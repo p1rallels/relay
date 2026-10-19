@@ -122,6 +122,23 @@ describe("relay tool: reset in place", () => {
 		expect(compaction?.type === "compaction" && compaction.summary.includes("FIRST") && !compaction.summary.includes("SECOND")).toBe(true);
 	});
 
+	test("a fresh context that starts past a step isn't nudged straight back for it", async () => {
+		env({ PI_RELAY_NUDGE_AT: "25", PI_RELAY_NUDGE_EVERY: "60" });
+		const h = await start();
+		const bigNote = "N".repeat(12_000);
+		h.respond([call("pad", { chars: 8_000 }), call("relay", { note: bigNote }), call("pad", { chars: 40 }), call("pad", { chars: 40 }), say("ok")]);
+		await h.session.prompt("go");
+		const entries = h.entries();
+		const resetAt = entries.findIndex((entry) => entry.type === "compaction");
+		const nudgesAt = relayEntries(entries, "nudge").map((entry) => entries.indexOf(entry));
+		expect(resetAt).toBeGreaterThan(0);
+		expect(nudgesAt.length).toBe(1);
+		expect(nudgesAt[0]).toBeLessThan(resetAt);
+		const afterReset = h.percents.slice(2).filter((percent): percent is number => percent !== null);
+		expect(afterReset.length).toBeGreaterThan(0);
+		expect(afterReset.every((percent) => percent >= 25)).toBe(true);
+	});
+
 	test("the cap refuses a reset and ends the loop", async () => {
 		env({ PI_RELAY_MAX_RESETS: "0", PI_RELAY_GOAL: "g" });
 		const h = await start();

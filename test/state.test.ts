@@ -19,6 +19,12 @@ describe("stateFrom", () => {
 		expect(stateFrom([relayMsg({ kind: "nudge", percent: 47, byUser: true })]).lastNudgeStep).toBeUndefined();
 	});
 
+	test("the baseline is the first good response since the context last shrank", () => {
+		expect(stateFrom([user("go"), assistant({ tokens: 900, stopReason: "error" }), assistant({ tokens: 1000 }), assistant({ tokens: 5000 })]).baselineTokens).toBe(1000);
+		expect(stateFrom([assistant({ tokens: 1000 }), compaction({ n: 1 })]).baselineTokens).toBeUndefined();
+		expect(stateFrom([assistant({ tokens: 1000 }), compaction({ n: 1 }), assistant({ tokens: 3000 }), assistant({ tokens: 4000 })]).baselineTokens).toBe(3000);
+	});
+
 	test("relay compactions count resets", () => {
 		const branch = [compaction({ n: 1, percent: 45 }), relayMsg({ kind: "reset", n: 1 }), compaction(), compaction({ n: 2 })];
 		expect(stateFrom(branch).resets).toBe(2);

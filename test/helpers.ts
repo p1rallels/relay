@@ -11,13 +11,14 @@ export const user = (text: string, minute = 0): Entry => ({
 	message: { role: "user", content: [{ type: "text", text }] },
 });
 
-export const assistant = (opts: { tools?: number; stopReason?: string } = {}): Entry => ({
+export const assistant = (opts: { tools?: number; stopReason?: string; tokens?: number } = {}): Entry => ({
 	type: "message",
 	id: nextId(),
 	timestamp: stamp(1),
 	message: {
 		role: "assistant",
 		stopReason: opts.stopReason ?? (opts.tools ? "toolUse" : "stop"),
+		...(opts.tokens === undefined ? {} : { usage: { input: 10, cacheRead: opts.tokens - 10, cacheWrite: 0, output: 50 } }),
 		content: [
 			{ type: "text", text: "ok" },
 			...Array.from({ length: opts.tools ?? 0 }, (_, index) => ({ type: "toolCall", id: `t${index}`, name: "bash", arguments: {} })),

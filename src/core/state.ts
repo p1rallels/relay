@@ -19,6 +19,12 @@ export interface RelayState {
 	readonly resets: number;
 	/** The last step nudged since the context last shrank (any compaction starts the steps over). */
 	readonly lastNudgeStep: number | undefined;
+	/**
+	 * How big the context was when it was last small: the request tokens of the first good response
+	 * after the latest compaction (or in the session). Steps it had already passed count as nudged,
+	 * so a fresh context that starts past a step (small window, big summary) isn't sent straight back.
+	 */
+	readonly baselineTokens: number | undefined;
 	/** Whether anything ever switched the loop on or off on this branch. */
 	readonly loopRecorded: boolean;
 	readonly loop: LoopState;
@@ -27,6 +33,7 @@ export interface RelayState {
 export const INITIAL_STATE: RelayState = {
 	resets: 0,
 	lastNudgeStep: undefined,
+	baselineTokens: undefined,
 	loopRecorded: false,
 	loop: { on: false, goal: undefined, stopped: undefined, errors: 0, idle: 0, progressed: true },
 };
@@ -39,7 +46,7 @@ export const reduce = (state: RelayState, entry: Entry): RelayState => {
 	if (entry.type === "compaction") {
 		const relay = relayCompaction(entry);
 		const resets = relay ? Math.max(state.resets + 1, relay.n) : state.resets;
-		return { ...state, resets, lastNudgeStep: undefined };
+		return { ...state, resets, lastNudgeStep: undefined, baselineTokens: undefined };
 	}
 	const switched = loopSwitch(entry);
 	if (switched?.loop === "on") {
@@ -63,7 +70,8 @@ export const reduce = (state: RelayState, entry: Entry): RelayState => {
 	const failed = assistant.stopReason === "error" || assistant.stopReason === "aborted";
 	const errors = failed ? state.loop.errors : 0;
 	const progressed = state.loop.progressed || assistant.toolCalls > 0;
-	return { ...state, loop: { ...state.loop, errors, progressed, idle: assistant.toolCalls > 0 ? 0 : state.loop.idle } };
+	const baselineTokens = state.baselineTokens ?? (!failed && assistant.requestTokens > 0 ? assistant.requestTokens : undefined);
+	return { ...state, baselineTokens, loop: { ...state.loop, errors, progressed, idle: assistant.toolCalls > 0 ? 0 : state.loop.idle } };
 };
 
 /** Relay state rebuilt from a branch (root to leaf), so a resume or a re-attach picks up where it was. */

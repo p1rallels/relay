@@ -117,7 +117,9 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		}
 		showStatus(ctx, percent, state.loop.on);
 		const current = config();
-		const step = aborted ? undefined : dueStep(percent, state.lastNudgeStep, current.nudgeAt, current.nudgeEvery);
+		const window = ctx.getContextUsage()?.contextWindow;
+		const baseline = state.baselineTokens !== undefined && window ? (state.baselineTokens / window) * 100 : undefined;
+		const step = aborted ? undefined : dueStep(percent, state.lastNudgeStep, current.nudgeAt, current.nudgeEvery, baseline);
 		if (step === undefined || percent === undefined) return undefined;
 		return { entries: [...event.entries, nudgeDraft(percent, step, state.lastNudgeStep === undefined)] };
 	});

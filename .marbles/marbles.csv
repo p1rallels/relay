@@ -6,5 +6,5 @@ m-c4a5,core: summary builder + lookup command,,closed,1,tandem relay-loop,tandem
 m-ff63,core: loop decision (done/abort/off/errors/cap),,closed,1,tandem relay-loop,tandem relay-loop,tandem relay-loop,2026-10-19T06:30:01.377Z,2026-10-19T06:45:13.652Z,,
 m-1843,"extension adapter: tool, turn_end, agent_before_settle, /relay, status",,closed,1,tandem relay-loop,tandem relay-loop,tandem relay-loop,2026-10-19T06:30:01.385Z,2026-10-19T06:45:13.652Z,,
 m-8aaa,unit tests for core,,closed,1,tandem relay-loop,tandem relay-loop,tandem relay-loop,2026-10-19T06:30:01.394Z,2026-10-19T06:50:37.795Z,,
-m-a356,"e2e with real pi (nudge, reset in place, lookup in summary, loop, abort)",,open,1,tandem relay-loop,tandem relay-loop,,2026-10-19T06:30:01.403Z,2026-10-19T06:30:01.403Z,,
+m-a356,"e2e with real pi (nudge, reset in place, lookup in summary, loop, abort)",,closed,1,tandem relay-loop,tandem relay-loop,tandem relay-loop,2026-10-19T06:30:01.403Z,2026-10-19T06:55:13.530Z,,
 m-6e5f,README + report,,open,2,tandem relay-loop,tandem relay-loop,,2026-10-19T06:30:01.411Z,2026-10-19T06:30:01.411Z,,

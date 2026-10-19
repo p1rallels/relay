@@ -118,6 +118,7 @@ interface MessageView {
 	readonly toolName?: unknown;
 	readonly details?: unknown;
 	readonly stopReason?: unknown;
+	readonly usage?: unknown;
 }
 
 const messageOf = (entry: Entry): MessageView | undefined => (entry.type === "message" ? (record(entry.message) as MessageView | undefined) : undefined);
@@ -165,11 +166,18 @@ export const userMessages = (entries: readonly Entry[]): UserMessage[] =>
 export interface AssistantView {
 	readonly stopReason: string | undefined;
 	readonly toolCalls: number;
+	/** What the request behind it carried: input + cache read + cache write tokens. */
+	readonly requestTokens: number;
 }
+
+const requestTokensOf = (usage: unknown): number => {
+	const fields = record(usage);
+	return ["input", "cacheRead", "cacheWrite"].reduce((sum, key) => sum + (finite(fields?.[key]) ?? 0), 0);
+};
 
 export const assistantMessage = (entry: Entry): AssistantView | undefined => {
 	const message = messageOf(entry);
 	if (message?.role !== "assistant") return undefined;
 	const toolCalls = Array.isArray(message.content) ? message.content.filter((part) => record(part)?.type === "toolCall").length : 0;
-	return { stopReason: text(message.stopReason), toolCalls };
+	return { stopReason: text(message.stopReason), toolCalls, requestTokens: requestTokensOf(message.usage) };
 };

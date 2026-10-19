@@ -9,15 +9,23 @@ export const stepAt = (percent: number, nudgeAt: number, every: number): number 
 };
 
 /**
- * The step to nudge at now: the highest step reached, when it is above the last step nudged since
- * the context last shrank. Jumping several steps at once gives one nudge, at the highest.
+ * The step to nudge at now: the highest step reached, when it is above both the last step nudged
+ * since the context last shrank and the step the context already started at (`baselinePercent`).
+ * Jumping several steps at once gives one nudge, at the highest.
  */
-export const dueStep = (percent: number | null | undefined, lastStep: number | undefined, nudgeAt: number, every: number): number | undefined => {
+export const dueStep = (
+	percent: number | null | undefined,
+	lastStep: number | undefined,
+	nudgeAt: number,
+	every: number,
+	baselinePercent?: number,
+): number | undefined => {
 	if (percent === null || percent === undefined) return undefined;
 	const step = stepAt(percent, nudgeAt, every);
 	if (step === undefined) return undefined;
-	if (lastStep !== undefined && step <= lastStep) return undefined;
-	return step;
+	const started = baselinePercent === undefined ? undefined : stepAt(baselinePercent, nudgeAt, every);
+	const floor = Math.max(lastStep ?? -Infinity, started ?? -Infinity);
+	return step > floor ? step : undefined;
 };
 
 /** Where the next nudge comes, for status reports. */

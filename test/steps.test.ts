@@ -37,6 +37,12 @@ describe("dueStep", () => {
 		expect(dueStep(null, undefined, 40, 5)).toBeUndefined();
 		expect(dueStep(undefined, undefined, 40, 5)).toBeUndefined();
 	});
+	test("steps the context already started past count as nudged", () => {
+		expect(dueStep(53, undefined, 40, 5, 52)).toBeUndefined();
+		expect(dueStep(55.5, undefined, 40, 5, 52)).toBe(55);
+		expect(dueStep(41, undefined, 40, 5, 12)).toBe(40);
+		expect(dueStep(57, 50, 40, 5, 41)).toBe(55);
+	});
 	test("after a reset the steps start over", () => {
 		expect(dueStep(12, undefined, 40, 5)).toBeUndefined();
 		expect(dueStep(40.5, undefined, 40, 5)).toBe(40);
