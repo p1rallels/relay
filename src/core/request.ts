@@ -33,17 +33,26 @@ export const askDelivered = (request: HumanRequest | undefined): HumanRequest | 
 
 export interface BeforeSettleStep {
 	readonly request: HumanRequest | undefined;
-	/** Append the ask and continue: the run's next turn answers it. */
-	readonly ask: boolean;
+	/** ask: append the ask and continue, the run's next turn answers it · failed: the request is dropped, say why. */
+	readonly action: "none" | "ask" | "failed";
 }
 
 /**
  * At the run's last boundary (agent_before_settle): a request that waited for the run gets its ask
  * now, straight into the context, and only once. It comes before the loop's prompt, so a keep-going
- * loop, which never lets a run settle, can't hold a /relay off.
+ * loop, which never lets a run settle, can't hold a /relay off. A request still answering here had its
+ * turn fail for good (pi retries before this boundary): it's dropped, so the loop's next turn can't reset mid-run.
  */
-export const beforeSettleStep = (request: HumanRequest | undefined): BeforeSettleStep =>
-	request === "after-run" ? { request: "answering", ask: true } : { request, ask: false };
+export const beforeSettleStep = (request: HumanRequest | undefined): BeforeSettleStep => {
+	switch (request) {
+		case "after-run":
+			return { request: "answering", action: "ask" };
+		case "answering":
+			return { request: undefined, action: "failed" };
+		default:
+			return { request, action: "none" };
+	}
+};
 
 export type TurnStep =
 	| { readonly reset: false; readonly request: HumanRequest | undefined }

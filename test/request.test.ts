@@ -37,10 +37,12 @@ describe("the ask", () => {
 		expect(isHandoffAsk(undefined)).toBe(false);
 	});
 	test("a request that waited for the run gets its ask at the run's last boundary, once", () => {
-		expect(beforeSettleStep("after-run")).toEqual({ request: "answering", ask: true });
-		expect(beforeSettleStep("answering")).toEqual({ request: "answering", ask: false });
-		expect(beforeSettleStep("ask-sent")).toEqual({ request: "ask-sent", ask: false });
-		expect(beforeSettleStep(undefined)).toEqual({ request: undefined, ask: false });
+		expect(beforeSettleStep("after-run")).toEqual({ request: "answering", action: "ask" });
+		expect(beforeSettleStep("ask-sent")).toEqual({ request: "ask-sent", action: "none" });
+		expect(beforeSettleStep(undefined)).toEqual({ request: undefined, action: "none" });
+	});
+	test("an ask whose turn failed for good is dropped at the boundary, before the loop can go on and reset mid-run", () => {
+		expect(beforeSettleStep("answering")).toEqual({ request: undefined, action: "failed" });
 	});
 });
 

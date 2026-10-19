@@ -530,6 +530,40 @@ describe("human /relay", () => {
 		expect(branchLines(h).at(-1)).toBe("assistant:fine");
 	});
 
+	test("busy, loop on: an ask whose turn fails is dropped and said so before the loop goes on, so the loop's turns can't reset", async () => {
+		env({ PI_RELAY_GOAL: "g" });
+		const h = await start();
+		const first = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+			say("RUN-DONE"),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "faux outage" }),
+			say("never answered"),
+		]);
+		const told = captureTold();
+		try {
+			const running = h.session.prompt("work");
+			await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+			await h.session.prompt("/relay");
+			first.open();
+			const prompt = await waitFor("the loop's prompt after the failed ask", () => relayEntries(h.entries(), "loop")[0]);
+			expect(prompt.details).toEqual({ kind: "loop", goal: "g", errors: 1, idle: 0 });
+			expect(told.lines()).toContain(requestText.failed());
+			await h.session.abort();
+			await running;
+			expect(told.lines()).not.toContain(requestText.aborted());
+		} finally {
+			told.restore();
+		}
+		expect(h.entries().filter(isAsk)).toHaveLength(1);
+		expect(h.entries().filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(h.requests).toHaveLength(3);
+		expect(requestTexts(h, 2).at(-1)).toStartWith("[relay] the human asked for a context reset");
+	});
+
 	test("idle: resets at the end of the turn even if the agent doesn't call relay", async () => {
 		env({});
 		const h = await start();

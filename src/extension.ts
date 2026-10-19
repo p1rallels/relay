@@ -163,7 +163,8 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		if (event.continue || event.context.pendingMessages.length > 0 || ctx.signal?.aborted === true) return undefined;
 		const asked = beforeSettleStep(request);
 		request = asked.request;
-		if (asked.ask) return { entries: [...event.entries, humanAskDraft(percentOf(ctx))], continue: true };
+		if (asked.action === "ask") return { entries: [...event.entries, humanAskDraft(percentOf(ctx))], continue: true };
+		if (asked.action === "failed") tell(ctx, requestText.failed(), "warning");
 		const state = stateOf(ctx);
 		const liveSubs = loopDecides(state.loop, event.outcome) && (await hasLiveSub(ctx.sessionManager.getSessionId()));
 		const decision = settleDecision(state.loop, event.outcome, liveSubs);
