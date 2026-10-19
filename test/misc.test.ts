@@ -85,6 +85,7 @@ describe("text", () => {
 			sessionId: "abc",
 			percent: 43,
 			contextWindow: 200_000,
+			baselinePercent: undefined,
 			state: { ...INITIAL_STATE, resets: 1, lastNudgeStep: 40 },
 			config: { nudgeAt: 40, nudgeEvery: 5, maxResets: undefined, goal: undefined },
 		});

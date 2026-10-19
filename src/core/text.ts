@@ -104,14 +104,15 @@ export interface StatusInput {
 	readonly sessionId: string;
 	readonly percent: number | null | undefined;
 	readonly contextWindow: number | undefined;
+	readonly baselinePercent: number | undefined;
 	readonly state: RelayState;
 	readonly config: RelayConfig;
 }
 
-export const statusReport = ({ sessionId, percent, contextWindow, state, config }: StatusInput): string => {
+export const statusReport = ({ sessionId, percent, contextWindow, baselinePercent, state, config }: StatusInput): string => {
 	const usage = percent === null || percent === undefined ? "context usage unknown until the next response" : `${formatPercent(percent)} of the context window`;
 	const window = contextWindow ? ` (${Math.round(contextWindow / 1000)}k tokens)` : "";
-	const next = formatPercent(nextStep(percent, state.lastNudgeStep, config.nudgeAt, config.nudgeEvery));
+	const next = formatPercent(nextStep(percent, state.lastNudgeStep, config.nudgeAt, config.nudgeEvery, baselinePercent));
 	const cap = config.maxResets === undefined ? "no cap" : `cap ${config.maxResets}`;
 	const loop = state.loop.on
 		? `on · goal: ${goalLine(state.loop.goal)} · errors ${state.loop.errors}/${MAX_ERRORS} · idle ${state.loop.idle}/${MAX_IDLE}`

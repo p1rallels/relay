@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { dueStep, nextStep, stepAt } from "../src/core/steps.ts";
+import { baselinePercent, dueStep, nextStep, stepAt } from "../src/core/steps.ts";
 
 describe("stepAt", () => {
 	test("below the first step there is none", () => {
@@ -49,6 +49,15 @@ describe("dueStep", () => {
 	});
 });
 
+describe("baselinePercent", () => {
+	test("tokens over the window; unknown when either is", () => {
+		expect(baselinePercent(50_000, 200_000)).toBe(25);
+		expect(baselinePercent(undefined, 200_000)).toBeUndefined();
+		expect(baselinePercent(50_000, undefined)).toBeUndefined();
+		expect(baselinePercent(50_000, 0)).toBeUndefined();
+	});
+});
+
 describe("nextStep", () => {
 	test("the first step when nothing was nudged", () => {
 		expect(nextStep(12, undefined, 40, 5)).toBe(40);
@@ -57,5 +66,6 @@ describe("nextStep", () => {
 	test("the step after the last nudge or the reached one", () => {
 		expect(nextStep(43, 40, 40, 5)).toBe(45);
 		expect(nextStep(51, 45, 40, 5)).toBe(55);
+		expect(nextStep(52, undefined, 40, 5, 51)).toBe(55);
 	});
 });

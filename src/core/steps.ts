@@ -28,9 +28,20 @@ export const dueStep = (
 	return step > floor ? step : undefined;
 };
 
+/** The context's size right after it last shrank, as a percent of the window. */
+export const baselinePercent = (baselineTokens: number | undefined, contextWindow: number | undefined): number | undefined =>
+	baselineTokens === undefined || contextWindow === undefined || !(contextWindow > 0) ? undefined : (baselineTokens / contextWindow) * 100;
+
 /** Where the next nudge comes, for status reports. */
-export const nextStep = (percent: number | null | undefined, lastStep: number | undefined, nudgeAt: number, every: number): number => {
+export const nextStep = (
+	percent: number | null | undefined,
+	lastStep: number | undefined,
+	nudgeAt: number,
+	every: number,
+	baselinePercent?: number,
+): number => {
 	const reached = percent === null || percent === undefined ? undefined : stepAt(percent, nudgeAt, every);
-	const floor = Math.max(lastStep ?? -Infinity, reached ?? -Infinity);
+	const started = baselinePercent === undefined ? undefined : stepAt(baselinePercent, nudgeAt, every);
+	const floor = Math.max(lastStep ?? -Infinity, reached ?? -Infinity, started ?? -Infinity);
 	return floor === -Infinity ? nudgeAt : tidy(floor + every);
 };

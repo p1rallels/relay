@@ -4,10 +4,10 @@ import { locateLookup, runCatchup, searchCommand } from "./catchup.ts";
 import { parseCommand, SUBCOMMANDS } from "./core/command.ts";
 import { readConfig, type RelayConfig, SETTINGS } from "./core/config.ts";
 import { humanAskDraft, loopDraft, loopOnDraft, loopStopDrafts, nudgeDraft, resetDrafts } from "./core/drafts.ts";
-import { CUSTOM_TYPE, type LoopSwitch, TOOL_NAME, type ToolDetails, userMessages } from "./core/entries.ts";
+import { CUSTOM_TYPE, type Entry, type LoopSwitch, TOOL_NAME, type ToolDetails, userMessages } from "./core/entries.ts";
 import { launchGoalApplies, settleDecision, toolDecision } from "./core/loop.ts";
 import { type RelayState, stateFrom } from "./core/state.ts";
-import { dueStep } from "./core/steps.ts";
+import { baselinePercent, dueStep } from "./core/steps.ts";
 import { buildSummary } from "./core/summary.ts";
 import { statusLine, statusReport, stopReasonText, toolResultText } from "./core/text.ts";
 
@@ -86,42 +86,49 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		pending = undefined;
 	});
 
+	const resetDraftsFor = async (ctx: ExtensionContext, request: PendingReset, branch: readonly Entry[], state: RelayState, percent: number | undefined) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		const lookup = locateLookup({ sessionId, sessionFile });
+		const n = state.resets + 1;
+		const goal = state.loop.goal;
+		const summary = buildSummary({
+			n,
+			percent,
+			sessionId,
+			sessionFile,
+			goal,
+			userMessages: userMessages(branch),
+			note: request.note,
+			byUser: request.byUser,
+			catchup: await runCatchup(lookup, sessionId),
+			searchCommand: searchCommand(lookup, sessionId),
+		});
+		return resetDrafts({ n, percent, note: request.note, goal, byUser: request.byUser, summary });
+	};
+
+	const nudgeDraftFor = (ctx: ExtensionContext, state: RelayState, percent: number | undefined) => {
+		const { nudgeAt, nudgeEvery } = config();
+		const baseline = baselinePercent(state.baselineTokens, ctx.getContextUsage()?.contextWindow);
+		const step = dueStep(percent, state.lastNudgeStep, nudgeAt, nudgeEvery, baseline);
+		if (step === undefined || percent === undefined) return undefined;
+		return nudgeDraft(percent, step, state.lastNudgeStep === undefined);
+	};
+
 	pi.on("turn_end", async (event, ctx) => {
 		const request = pending;
 		pending = undefined;
-		const percent = percentOf(ctx);
 		const aborted = event.outcome === "aborted" || ctx.signal?.aborted === true;
+		const percent = percentOf(ctx);
 		const branch = ctx.sessionManager.getBranch();
 		const state = stateFrom(branch);
 		if (request && !aborted) {
-			const sessionId = ctx.sessionManager.getSessionId();
-			const sessionFile = ctx.sessionManager.getSessionFile();
-			const lookup = locateLookup({ sessionId, sessionFile });
-			const catchup = await runCatchup(lookup, sessionId);
-			const n = state.resets + 1;
-			const goal = state.loop.goal;
-			const summary = buildSummary({
-				n,
-				percent,
-				sessionId,
-				sessionFile,
-				goal,
-				userMessages: userMessages(branch),
-				note: request.note,
-				byUser: request.byUser,
-				catchup,
-				searchCommand: searchCommand(lookup, sessionId),
-			});
 			showStatus(ctx, undefined, state.loop.on);
-			return { entries: [...event.entries, ...resetDrafts({ n, percent, note: request.note, goal, byUser: request.byUser, summary })], continue: true };
+			return { entries: [...event.entries, ...(await resetDraftsFor(ctx, request, branch, state, percent))], continue: true };
 		}
 		showStatus(ctx, percent, state.loop.on);
-		const current = config();
-		const window = ctx.getContextUsage()?.contextWindow;
-		const baseline = state.baselineTokens !== undefined && window ? (state.baselineTokens / window) * 100 : undefined;
-		const step = aborted ? undefined : dueStep(percent, state.lastNudgeStep, current.nudgeAt, current.nudgeEvery, baseline);
-		if (step === undefined || percent === undefined) return undefined;
-		return { entries: [...event.entries, nudgeDraft(percent, step, state.lastNudgeStep === undefined)] };
+		const nudge = aborted ? undefined : nudgeDraftFor(ctx, state, percent);
+		return nudge ? { entries: [...event.entries, nudge] } : undefined;
 	});
 
 	pi.on("agent_before_settle", async (event, ctx) => {
@@ -217,7 +224,14 @@ export default function relayLoop(pi: ExtensionAPI): void {
 			switch (command.kind) {
 				case "status": {
 					const usage = ctx.getContextUsage();
-					const report = statusReport({ sessionId: ctx.sessionManager.getSessionId(), percent, contextWindow: usage?.contextWindow, state, config: config() });
+					const report = statusReport({
+						sessionId: ctx.sessionManager.getSessionId(),
+						percent,
+						contextWindow: usage?.contextWindow,
+						baselinePercent: baselinePercent(state.baselineTokens, usage?.contextWindow),
+						state,
+						config: config(),
+					});
 					tell(ctx, report);
 					return;
 				}
