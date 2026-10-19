@@ -78,7 +78,7 @@ export const nudge = async (): Promise<boolean> => {
 };
 
 export const reset = async (): Promise<boolean> => {
-	const w = world("reset", { PI_RELAY_NUDGE_AT: "0.5", PI_RELAY_NUDGE_EVERY: "50" });
+	const w = world("reset", { PI_RELAY_NUDGE_AT: "1", PI_RELAY_NUDGE_EVERY: "50" });
 	const checks: Check[] = [];
 	try {
 		const prompt = [

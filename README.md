@@ -15,8 +15,9 @@ pi install ~/Desktop/cc/relay-loop
 **Nudges.** At the end of each turn relay reads `ctx.getContextUsage()`. When usage crosses 40% of the
 model's context window, and then every further 5% (45, 50, 55, …), it appends a visible `[relay]` message:
 you're at N%; finish the step you're on, commit, and call `relay` with a note. One nudge per step; the steps
-start over after any compaction. Relay never resets on its own, and pi's own auto-compaction near the window
-limit stays the last-resort safety net.
+start over after any compaction, and steps the context had already passed right after it (its first response)
+count as nudged, so a fresh context that starts big (small window, long summary) isn't sent straight back.
+Relay never resets on its own, and pi's own auto-compaction near the window limit stays the last-resort safety net.
 
 **The `relay` tool.** `relay({ note })` queues a reset for the end of the current turn. Then, at that
 `turn_end` boundary, relay appends a retain-none compaction (pi records its own id as `firstKeptEntryId`) and
