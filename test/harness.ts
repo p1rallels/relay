@@ -7,7 +7,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	type ExtensionAPI,
-	type ExtensionMode,
+	type ExtensionContext,
 	ModelRuntime,
 	type SessionEntry,
 	SessionManager,
@@ -16,6 +16,9 @@ import { Type } from "typebox";
 import relayLoop from "../src/extension.ts";
 
 export const CONTEXT_WINDOW = 20_000;
+
+type ExtensionMode = ExtensionContext["mode"];
+type ToolArgs = Parameters<typeof fauxToolCall>[1];
 
 /** A test-only tool that makes the context grow by `chars`, and a recorder of usage at each turn_end. */
 const probe =
@@ -51,9 +54,9 @@ export interface Harness {
 export type Step = AssistantMessage | ((context: TranscriptContext) => AssistantMessage | Promise<AssistantMessage>);
 
 export const say = (text: string): AssistantMessage => fauxAssistantMessage(text);
-export const call = (name: string, args: Record<string, unknown>): AssistantMessage =>
+export const call = (name: string, args: ToolArgs): AssistantMessage =>
 	fauxAssistantMessage([fauxText(`calling ${name}`), fauxToolCall(name, args)], { stopReason: "toolUse" });
-export const calls = (...list: [string, Record<string, unknown>][]): AssistantMessage =>
+export const calls = (...list: [string, ToolArgs][]): AssistantMessage =>
 	fauxAssistantMessage(
 		list.map(([name, args]) => fauxToolCall(name, args)),
 		{ stopReason: "toolUse" },
