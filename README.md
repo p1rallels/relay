@@ -34,6 +34,12 @@ compaction summary and that message. The summary is plain text built by a pure f
 One reset per turn: a second `relay` call in the same turn does nothing and says so.
 `relay({ note, done: true })` ends a loop instead (see below): no reset, and the note is the agent's final word.
 
+**Reply first.** Nothing comes after a `relay` call in the old context, so the tool's description tells the agent
+to put anything you should read (an answer, a report) in its text before the call; the note is a handoff, not a reply.
+If the agent wrote no text at all after your last message (it only ran tools, or called `relay` right away), the
+reset message ends with `the user hasn't seen a reply to their last message (#n): you wrote them nothing after it
+before the reset.`, so the fresh context knows it still owes you one.
+
 **Queued messages survive a reset.** What arrives while the agent is in the turn that resets (your steers
 and follow-ups, msg's messages, which it delivers as steers) stays queued past the reset and lands in the
 fresh context right after the reset message, in pi's usual order: steers first, one per turn, in the order

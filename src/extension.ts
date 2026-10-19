@@ -4,7 +4,7 @@ import { locateLookup, runCatchup, searchCommand } from "./catchup.ts";
 import { parseCommand, SUBCOMMANDS } from "./core/command.ts";
 import { readConfig, type RelayConfig, SETTINGS } from "./core/config.ts";
 import { humanAskDraft, loopDraft, loopOnDraft, loopStopDrafts, nudgeDraft, resetDrafts } from "./core/drafts.ts";
-import { CUSTOM_TYPE, type Entry, isHandoffAsk, type LoopSwitch, TOOL_NAME, type ToolDetails, userMessages } from "./core/entries.ts";
+import { CUSTOM_TYPE, type Entry, isHandoffAsk, type LoopSwitch, TOOL_NAME, type ToolDetails, unansweredUser, userMessages } from "./core/entries.ts";
 import { launchGoalApplies, loopDecides, settleDecision, toolDecision } from "./core/loop.ts";
 import { askDelivered, beforeSettleStep, commandStep, type HumanRequest, settledStep, turnStep } from "./core/request.ts";
 import { type RelayState, stateFrom } from "./core/state.ts";
@@ -122,7 +122,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 			catchup: await runCatchup(lookup, sessionId),
 			searchCommand: searchCommand(lookup, sessionId),
 		});
-		return resetDrafts({ n, percent, note: reset.note, goal, byUser: reset.byUser, summary });
+		return resetDrafts({ n, percent, note: reset.note, goal, byUser: reset.byUser, summary, unanswered: unansweredUser(branch) });
 	};
 
 	const nudgeDraftFor = (ctx: ExtensionContext, state: RelayState, percent: number | undefined) => {
@@ -227,6 +227,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		description: [
 			"Hand off and reset your context in place: same session, same file, a fresh context.",
 			"Call it when a [relay] message nudges you, or when the user asks, at a clean checkpoint (the step you were on is finished and committed).",
+			"Reply first: anything the user should read (an answer, a report) goes in your text before this call. Nothing comes after the call in this context, and the user doesn't read your note as a reply.",
 			"note: the handoff for whoever picks this up after the reset (that's you, without your current context): what's done, what's next, gotchas, where things are (files, branches, commands).",
 			"The reset happens as soon as this turn's tool calls finish; you then continue with a fresh context that opens with the goal, the user's messages, your note and the recent conversation.",
 			"done: true instead ends a [relay loop] when its goal is completely done (or you can't go on without a human): no reset, the note is your final word.",

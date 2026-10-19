@@ -171,6 +171,22 @@ export const userMessages = (entries: readonly Entry[]): UserMessage[] =>
 		})
 		.map((message, position) => ({ index: position + 1, ...message }));
 
+const saysSomething = (entry: Entry): boolean => {
+	const message = messageOf(entry);
+	return message?.role === "assistant" && partsText(message.content).trim() !== "";
+};
+
+/**
+ * The number (as in `userMessages`) of the last user message when no assistant message after it has any text:
+ * the agent only ran tools, or called relay, so the human hasn't seen a reply to it. Undefined otherwise.
+ */
+export const unansweredUser = (entries: readonly Entry[]): number | undefined => {
+	const users = entries.flatMap((entry, at) => (messageOf(entry)?.role === "user" ? [at] : []));
+	const last = users.at(-1);
+	if (last === undefined) return undefined;
+	return entries.slice(last + 1).some(saysSomething) ? undefined : users.length;
+};
+
 export interface AssistantView {
 	readonly stopReason: string | undefined;
 	readonly toolCalls: number;

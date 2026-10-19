@@ -46,10 +46,12 @@ export interface ResetInput {
 	readonly goal: string | undefined;
 	readonly byUser: boolean;
 	readonly summary: string;
+	/** The user's last message, by number, when the agent wrote no text after it before this reset. */
+	readonly unanswered: number | undefined;
 }
 
 /** A reset: a retain-none compaction carrying the catch-up, then the visible message the fresh context opens with. */
-export const resetDrafts = ({ n, percent, note, goal, byUser, summary }: ResetInput): readonly [CompactionDraft, MessageDraft] => {
+export const resetDrafts = ({ n, percent, note, goal, byUser, summary, unanswered }: ResetInput): readonly [CompactionDraft, MessageDraft] => {
 	const relay: CompactionRelay = {
 		n,
 		...(percent === undefined ? {} : { percent: roundPercent(percent) }),
@@ -58,7 +60,7 @@ export const resetDrafts = ({ n, percent, note, goal, byUser, summary }: ResetIn
 	};
 	return [
 		{ type: "compaction", summary, firstKeptEntryId: null, details: { relay } },
-		message(resetText(n, percent, byUser), { kind: "reset", ...relay, ...(byUser ? { byUser: true as const } : {}) }),
+		message(resetText(n, percent, byUser, unanswered), { kind: "reset", ...relay, ...(byUser ? { byUser: true as const } : {}) }),
 	];
 };
 

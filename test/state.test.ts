@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { userMessages } from "../src/core/entries.ts";
+import { type Entry, unansweredUser, userMessages } from "../src/core/entries.ts";
 import { INITIAL_STATE, stateFrom } from "../src/core/state.ts";
 import { assistant, compaction, relayMsg, relayResult, relaySwitch, user } from "./helpers.ts";
 
@@ -88,5 +88,27 @@ describe("userMessages", () => {
 			{ index: 2, text: "look\n[image]", timestamp: "t" },
 			{ index: 3, text: "plain", timestamp: undefined },
 		]);
+	});
+});
+
+describe("unansweredUser", () => {
+	const quiet = (content: unknown[]): Entry => ({ type: "message", message: { role: "assistant", stopReason: "toolUse", content } });
+	const relayCall = { type: "toolCall", id: "t", name: "relay", arguments: { note: "answered it" } };
+	const toolsOnly = quiet([{ type: "toolCall", id: "b", name: "bash", arguments: {} }]);
+	const thinksOnly = quiet([{ type: "thinking", thinking: "the answer is 4" }, { type: "text", text: "  \n" }, relayCall]);
+
+	test("the last user message, by number, when nothing the agent wrote after it has text", () => {
+		expect(unansweredUser([user("q1"), assistant(), user("q2"), toolsOnly, relayResult({ outcome: "queued" }), thinksOnly])).toBe(2);
+		expect(unansweredUser([user("q1"), relayMsg({ kind: "nudge", step: 40 }), quiet([relayCall])])).toBe(1);
+	});
+
+	test("any text after it is a reply: in the message that calls relay, or earlier", () => {
+		expect(unansweredUser([user("q1"), assistant({ tools: 1 })])).toBeUndefined();
+		expect(unansweredUser([user("q1"), assistant(), toolsOnly, quiet([relayCall])])).toBeUndefined();
+	});
+
+	test("no user message, nothing to answer", () => {
+		expect(unansweredUser([])).toBeUndefined();
+		expect(unansweredUser([relayMsg({ kind: "loop" }), toolsOnly])).toBeUndefined();
 	});
 });

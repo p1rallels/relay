@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { stepAt } from "../src/core/steps.ts";
 import { stateFrom } from "../src/core/state.ts";
@@ -162,6 +162,26 @@ describe("relay tool: reset in place", () => {
 		const section = compaction.summary.slice(compaction.summary.indexOf("## recent conversation"));
 		expect(section).toContain(`--root ${h.sessions} catchup ${h.session.sessionManager.getSessionId()} -n 30`);
 		expect(section).toMatch(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\s+\S+\s+[0-9a-f]{8}:\d+\s+user\n\s+UNIQUE-PROMPT-31337/);
+	});
+
+	test("a relay call with no text after the user's message: the reset message says they haven't seen a reply", async () => {
+		env({});
+		const h = await start();
+		h.respond([calls(["relay", { note: "answered: 4" }]), say("4")]);
+		await h.session.prompt("what's 2+2? then relay");
+		const reset = relayEntries(h.entries(), "reset")[0];
+		expect(contentText(reset?.content)).toContain("the user hasn't seen a reply to their last message (#1): you wrote them nothing after it before the reset.");
+		expect(requestTexts(h, 1).at(-1)).toContain("hasn't seen a reply to their last message (#1)");
+	});
+
+	test("text in the message that calls relay is a reply", async () => {
+		env({});
+		const h = await start();
+		h.respond([fauxAssistantMessage([fauxText("it's 4"), fauxToolCall("relay", { note: "answered: 4" })], { stopReason: "toolUse" }), say("ok")]);
+		await h.session.prompt("what's 2+2? then relay");
+		const reset = relayEntries(h.entries(), "reset")[0];
+		expect(contentText(reset?.content)).toContain("context reset #1");
+		expect(contentText(reset?.content)).not.toContain("hasn't seen a reply");
 	});
 
 	test("a second relay call in the same turn is a no-op that says so", async () => {

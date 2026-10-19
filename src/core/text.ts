@@ -47,11 +47,13 @@ export const humanResetAskText = (percent: number | undefined): string =>
 		"the reset happens at the end of this turn either way.",
 	].join(" ");
 
-export const resetText = (n: number, percent: number | undefined, byUser: boolean): string =>
+/** `unanswered`: the number of the user's last message when the agent wrote no text after it before the reset. */
+export const resetText = (n: number, percent: number | undefined, byUser: boolean, unanswered: number | undefined): string =>
 	[
 		`[relay] context reset #${n}${percent === undefined ? "" : ` (was at ${formatPercent(percent)})`}${byUser ? ", asked for by the human" : ""}, in place: same session, same file, fresh context.`,
 		"the summary above has the goal, the user's messages, the handoff note and the recent conversation.",
 		"check git status, git log --oneline -5 and mb ready, then carry on from the note.",
+		...(unanswered === undefined ? [] : [`the user hasn't seen a reply to their last message (#${unanswered}): you wrote them nothing after it before the reset.`]),
 	].join(" ");
 
 export const loopText = (goal: string | undefined, errors: number, idle: number): string => {

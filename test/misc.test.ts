@@ -46,13 +46,19 @@ describe("lookup command", () => {
 
 describe("drafts", () => {
 	test("a reset is a retain-none compaction, then the reset message", () => {
-		const [compaction, message] = resetDrafts({ n: 1, percent: 45.678, note: " next: tests ", goal: undefined, byUser: false, summary: "S" });
+		const [compaction, message] = resetDrafts({ n: 1, percent: 45.678, note: " next: tests ", goal: undefined, byUser: false, summary: "S", unanswered: undefined });
 		expect(compaction).toEqual({ type: "compaction", summary: "S", firstKeptEntryId: null, details: { relay: { n: 1, percent: 45.6, note: "next: tests" } } });
 		expect(message.type).toBe("custom_message");
 		expect(message.customType).toBe("relay");
 		expect(message.display).toBe(true);
 		expect(message.details).toEqual({ kind: "reset", n: 1, percent: 45.6, note: "next: tests" });
 		expect(message.content).toContain("context reset #1 (was at 45%)");
+		expect(message.content).not.toContain("hasn't seen a reply");
+	});
+	test("a reset says when the user's last message got no text before it; the details stay the same", () => {
+		const [, message] = resetDrafts({ n: 3, percent: 39.2, note: "n", goal: undefined, byUser: false, summary: "S", unanswered: 18 });
+		expect(message.content.endsWith("carry on from the note. the user hasn't seen a reply to their last message (#18): you wrote them nothing after it before the reset.")).toBe(true);
+		expect(message.details).toEqual({ kind: "reset", n: 3, percent: 39.2, note: "n" });
 	});
 	test("a nudge carries its percent and step", () => {
 		expect(nudgeDraft(44.96, 40, false).details).toEqual({ kind: "nudge", percent: 44.9, step: 40 });
