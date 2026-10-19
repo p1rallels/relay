@@ -26,7 +26,8 @@ export interface SwitchDraft {
 
 export type Draft = MessageDraft | CompactionDraft | SwitchDraft;
 
-export const roundPercent = (percent: number): number => Math.round(percent * 10) / 10;
+/** Floored to a tenth, like the text, so a nudge's percent never reads as the next step: 44.96 → 44.9. */
+export const roundPercent = (percent: number): number => Math.floor(percent * 10 + 1e-9) / 10;
 
 const message = (content: string, details: RelayDetails): MessageDraft => ({ type: "custom_message", customType: CUSTOM_TYPE, content, display: true, details });
 
