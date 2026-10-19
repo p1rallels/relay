@@ -1,24 +1,31 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { requestText, unknownCommandText } from "../src/core/text.ts";
 import {
 	assistantText,
 	type Check,
 	check,
 	clip,
 	detailsOf,
+	HOLD_EXTENSION,
 	isAssistant,
 	type Json,
 	messageOf,
+	notices,
 	piArgs,
 	relayMessages,
 	relayResults,
 	relaySwitches,
 	report,
 	requestTokens,
+	responseTo,
+	send,
 	sessionFiles,
 	sessionLines,
 	sleep,
 	spawnPi,
+	textOf,
+	toolCalls,
 	waitUntil,
 	within,
 	world,
@@ -187,4 +194,126 @@ export const abort = async (): Promise<boolean> => {
 	return report("abort: esc/abort stops the loop (rpc mode)", checks);
 };
 
-export const SCENARIOS = { nudge, reset, loop, abort } as const;
+const isAsk = (line: Json): boolean => relayMessages([line], "nudge").length === 1 && detailsOf(line).byUser === true;
+
+const dataOf = (line: Json | undefined): Json => {
+	const data = line?.data;
+	return typeof data === "object" && data !== null ? (data as Json) : {};
+};
+
+/** The session's lines after its one compaction, once an assistant has answered there. */
+const answeredAfterReset = (lines: readonly Json[]): true | undefined => {
+	const at = lines.findIndex((line) => line.type === "compaction");
+	return at >= 0 && lines.slice(at).some(isAssistant) ? true : undefined;
+};
+
+/**
+ * A /relay sent while the agent works waits for its run: the agent finishes all three steps, then it's
+ * asked for its note, and the context resets at the end of that turn. Two /relay's are one request, and
+ * /relay with text resets nothing.
+ */
+export const midrun = async (): Promise<boolean> => {
+	const w = world("midrun", { PI_RELAY_NUDGE_AT: "90" });
+	const checks: Check[] = [];
+	try {
+		const prompt = [
+			"This is a test of a context reset the human asks for.",
+			"1) Run these three bash commands, exactly one per turn, in this order: `sleep 3; echo STEP-ONE`, then `sleep 3; echo STEP-TWO`, then `sleep 3; echo STEP-THREE`.",
+			"2) After the third, reply with exactly ALL-DONE and end your turn.",
+			"3) If a [relay] message then asks you for a handoff note, call the relay tool with the note exactly: MIDRUN-NOTE three steps done; next: reply RESUMED",
+			"4) After your context is reset, reply with exactly RESUMED and nothing else.",
+		].join("\n");
+		const run = spawnPi(w, piArgs(w, ["--mode", "rpc"]), true);
+		send(run, { id: "p1", type: "prompt", message: prompt });
+		await waitUntil("the first bash call", () => (sessionLines(w).some((line) => toolCalls(line).includes("bash")) ? true : undefined), 3 * 60_000);
+		const busy = sessionLines(w);
+		send(run, { id: "r1", type: "prompt", message: "/relay" });
+		send(run, { id: "r2", type: "prompt", message: "/relay" });
+		send(run, { id: "r3", type: "prompt", message: "/relay make it quick" });
+		await waitUntil("an answer after the reset", () => answeredAfterReset(sessionLines(w)), 4 * 60_000);
+		await sleep(3_000);
+		run.proc.stdin.end();
+		const result = await within("pi rpc to exit", run.done, 60_000);
+		const lines = sessionLines(w);
+		const told = notices(result.stdout);
+		const compactions = lines.filter((line) => line.type === "compaction");
+		const at = (find: (line: Json) => boolean) => lines.findIndex(find);
+		const stepThree = at((line) => messageOf(line)?.role === "toolResult" && textOf(line).includes("STEP-THREE"));
+		const allDone = at((line) => isAssistant(line) && assistantText(line).includes("ALL-DONE"));
+		const asks = lines.filter(isAsk);
+		const ask = at(isAsk);
+		const reset = at((line) => line.type === "compaction");
+		const resetMessage = relayMessages(lines, "reset")[0];
+		const after = lines.slice(reset + 1).filter(isAssistant).map(assistantText);
+		checks.push(
+			check("the /relay's came in while the agent worked", busy.filter((line) => messageOf(line)?.role === "toolResult").length < 3 && !busy.some((line) => line.type === "compaction")),
+			check("exactly one ask for a handoff note, and one reset: two /relay's are one request", asks.length === 1 && compactions.length === 1, `${asks.length} ask(s), ${compactions.length} compaction(s)`),
+			check("the run wasn't cut off: all three steps ran, and it ended, before the ask", stepThree >= 0 && allDone > stepThree && ask > allDone, `step three at ${stepThree}, ALL-DONE at ${allDone}, ask at ${ask}`),
+			check("nothing reset before the ask", reset > ask, `ask at ${ask}, compaction at ${reset}`),
+			check("the reset carries the agent's own note", JSON.stringify(detailsOf(compactions[0]).relay ?? {}).includes("MIDRUN-NOTE"), clip(JSON.stringify(detailsOf(compactions[0])))),
+			check("the reset is marked as the human's", detailsOf(resetMessage).byUser === true, clip(JSON.stringify(detailsOf(resetMessage)))),
+			check("the agent picked up after the reset", after.some((text) => text.includes("RESUMED")), clip(after.join(" | "))),
+			check("the human heard it waits for the run, once, then that it was already asked", told.filter((text) => text === requestText.waiting()).length === 1 && told.includes(requestText.duplicate("after-run")), clip(told.join(" | "))),
+			check("/relay with text resets nothing and asks if it was a goal", told.includes(unknownCommandText("make it quick"))),
+		);
+	} catch (error) {
+		checks.push(failure(error));
+	} finally {
+		w.dispose();
+	}
+	return report("midrun: a /relay sent while the agent works waits for its run (rpc mode)", checks);
+};
+
+/**
+ * A msg-style custom message (deliverAs steer), a steer and a follow-up, all queued in the turn whose
+ * relay call resets the context, land after the reset, in the fresh context, in order, and get done.
+ * e2e/hold.ts holds the relay call long enough to queue them inside that turn.
+ */
+export const queue = async (): Promise<boolean> => {
+	const w = world("queue", { PI_RELAY_NUDGE_AT: "90", PI_RELAY_MAX_RESETS: "1", RELAY_E2E_HOLD_MS: "8000" });
+	const marker = join(w.sessions, "..", "held");
+	w.env.RELAY_E2E_HOLD_MARKER = marker;
+	const checks: Check[] = [];
+	try {
+		const prompt = [
+			"This is a test of messages queued while your context resets.",
+			"1) Call the relay tool now, before anything else, with the note exactly: QUEUE-NOTE nothing done yet; next: do what each message after the reset says",
+			"2) After your context is reset, messages arrive one at a time. Do exactly what each one says, with bash, then end your turn. Don't call relay again.",
+		].join("\n");
+		const run = spawnPi(w, piArgs(w, ["-e", HOLD_EXTENSION, "--mode", "rpc"]), true);
+		send(run, { id: "p1", type: "prompt", message: prompt });
+		await waitUntil("the relay call, held", () => (existsSync(marker) ? true : undefined), 3 * 60_000, 100);
+		const queuedAt = Date.now();
+		send(run, { id: "s1", type: "prompt", message: "QUEUED-STEER: run `echo s > steer.txt` with bash.", streamingBehavior: "steer" });
+		send(run, { id: "f1", type: "prompt", message: "QUEUED-FOLLOWUP: run `echo f > follow.txt` with bash.", streamingBehavior: "followUp" });
+		await waitUntil("follow.txt", () => (existsSync(join(w.cwd, "follow.txt")) ? true : undefined), 4 * 60_000);
+		await sleep(5_000);
+		run.proc.stdin.end();
+		const result = await within("pi rpc to exit", run.done, 60_000);
+		const lines = sessionLines(w);
+		const compactions = lines.filter((line) => line.type === "compaction");
+		const reset = lines.findIndex((line) => line.type === "compaction");
+		const landed = (tag: string) => lines.findIndex((line) => (line.type === "custom_message" || messageOf(line)?.role === "user") && textOf(line).startsWith(tag));
+		const order = ["QUEUED-MSG", "QUEUED-STEER", "QUEUED-FOLLOWUP"].map(landed);
+		const [msgAt = -1, steerAt = -1, followUpAt = -1] = order;
+		const file = (name: string) => (existsSync(join(w.cwd, name)) ? readFileSync(join(w.cwd, name), "utf8").trim() : "(missing)");
+		const queued = ["s1", "f1"].map((id) => dataOf(responseTo(result.stdout, id)).disposition);
+		const resetAt = Date.parse(String(compactions[0]?.timestamp ?? ""));
+		checks.push(
+			check("exactly one reset", compactions.length === 1, `${compactions.length}`),
+			check("the steer and the follow-up were queued while the agent worked", queued.every((disposition) => disposition === "queued"), JSON.stringify(queued)),
+			check("they were queued before the reset was written", resetAt > queuedAt, `queued at ${new Date(queuedAt).toISOString()}, reset at ${compactions[0]?.timestamp}`),
+			check("all three land after the reset, in the fresh context", order.every((index) => index > reset) && reset >= 0, `compaction at ${reset}, queued at ${order.join(", ")}`),
+			check("in order: the msg-style steer, the steer, then the follow-up", msgAt < steerAt && steerAt < followUpAt, order.join(" < ")),
+			check("the reset message opens the fresh context, before them", relayMessages([lines[reset + 1] ?? {}], "reset").length === 1),
+			check("each got done", file("msg.txt") === "m" && file("steer.txt") === "s" && file("follow.txt") === "f", `msg.txt ${file("msg.txt")}, steer.txt ${file("steer.txt")}, follow.txt ${file("follow.txt")}`),
+		);
+	} catch (error) {
+		checks.push(failure(error));
+	} finally {
+		w.dispose();
+	}
+	return report("queue: a steer, a follow-up and a msg-style message queued in the reset's turn land after it (rpc mode)", checks);
+};
+
+export const SCENARIOS = { nudge, reset, loop, abort, midrun, queue } as const;

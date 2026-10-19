@@ -59,7 +59,13 @@ describe("buildSummary", () => {
 	test("a human reset says so; unknown usage leaves out the percent", () => {
 		const text = buildSummary(input({ byUser: true, percent: undefined, note: "" }));
 		expect(text.split("\n")[0]).toBe("context reset #2, asked for by the human, in place: this is still session abc; everything before is in its file (/s/2026_abc.jsonl).");
-		expect(text).toContain("## handoff note (from the human's /relay)\n(none)");
+		expect(text).toContain("## handoff note\n(none: the human asked for this reset with /relay and the agent didn't write one)");
+	});
+
+	test("the note of a human reset is the agent's, under the same title", () => {
+		const text = buildSummary(input({ byUser: true, note: "AGENT-NOTE" }));
+		expect(text).toContain("## handoff note\nAGENT-NOTE");
+		expect(text).not.toContain("the human's note");
 	});
 
 	test("deterministic", () => {

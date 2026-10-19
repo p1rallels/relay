@@ -5,6 +5,8 @@ import type { Subprocess } from "bun";
 
 export const REPO = resolve(import.meta.dir, "..");
 export const EXTENSION = join(REPO, "src/extension.ts");
+/** e2e only: holds the agent's first relay call, and queues a message the way msg does. */
+export const HOLD_EXTENSION = join(REPO, "e2e/hold.ts");
 export const MODEL = process.env.E2E_MODEL ?? "anthropic/claude-haiku-5-5";
 export const THINKING = process.env.E2E_THINKING ?? "low";
 
@@ -18,7 +20,7 @@ export interface World {
 	readonly dispose: () => void;
 }
 
-/** A temp cwd and session dir, and an env without the caller's session or relay settings. */
+/** A temp cwd, session dir and msg store, and an env without the caller's session or relay settings. */
 export const world = (label: string, extraEnv: Record<string, string> = {}): World => {
 	const base = mkdtempSync(join(tmpdir(), `relay-e2e-${label}-`));
 	const cwd = join(base, "cwd");
@@ -32,7 +34,7 @@ export const world = (label: string, extraEnv: Record<string, string> = {}): Wor
 	return {
 		cwd,
 		sessions,
-		env: { ...Object.fromEntries(inherited), ...extraEnv },
+		env: { ...Object.fromEntries(inherited), PI_MSG_DIR: join(base, "msg"), ...extraEnv },
 		children,
 		dispose: () => {
 			for (const child of children) if (child.exitCode === null) child.kill();
@@ -76,6 +78,30 @@ export const spawnPi = (w: World, args: readonly string[], keepStdin = false): R
 	}));
 	return { proc, done };
 };
+
+/** One rpc command on pi's stdin. */
+export const send = (run: Run, command: Json): void => {
+	run.proc.stdin.write(`${JSON.stringify(command)}\n`);
+};
+
+export const jsonLines = (text: string): Json[] =>
+	text
+		.split("\n")
+		.filter((line) => line.trim().startsWith("{"))
+		.flatMap((line) => {
+			try {
+				return [JSON.parse(line) as Json];
+			} catch {
+				return [];
+			}
+		});
+
+/** What extensions told the human in rpc mode (ctx.ui.notify), in order. */
+export const notices = (stdout: string): string[] =>
+	jsonLines(stdout).flatMap((line) => (line.type === "extension_ui_request" && line.method === "notify" ? [String(line.message ?? "")] : []));
+
+/** The rpc response to the command with this id. */
+export const responseTo = (stdout: string, id: string): Json | undefined => jsonLines(stdout).find((line) => line.type === "response" && line.id === id);
 
 export const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
@@ -133,6 +159,21 @@ export const detailsOf = (line: Json | undefined): Json => record(line?.details)
 export const requestTokens = (line: Json): number => {
 	const usage = record(messageOf(line)?.usage) ?? {};
 	return ["input", "cacheRead", "cacheWrite"].reduce((sum, key) => sum + (typeof usage[key] === "number" ? (usage[key] as number) : 0), 0);
+};
+
+/** The names of the tools an assistant message calls. */
+export const toolCalls = (line: Json): string[] => {
+	const content = messageOf(line)?.content;
+	if (!Array.isArray(content)) return [];
+	return content.flatMap((part) => (record(part)?.type === "toolCall" ? [String(record(part)?.name ?? "")] : []));
+};
+
+/** The text of any message: a user's, an assistant's, a tool result's, or an extension's custom message. */
+export const textOf = (line: Json | undefined): string => {
+	const content = line?.type === "custom_message" ? line.content : messageOf(line ?? {})?.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part) => (record(part)?.type === "text" ? String(record(part)?.text ?? "") : "")).join("");
 };
 
 export const assistantText = (line: Json | undefined): string => {

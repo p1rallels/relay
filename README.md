@@ -34,14 +34,21 @@ compaction summary and that message. The summary is plain text built by a pure f
 One reset per turn: a second `relay` call in the same turn does nothing and says so.
 `relay({ note, done: true })` ends a loop instead (see below): no reset, and the note is the agent's final word.
 
+**Queued messages survive a reset.** What arrives while the agent is in the turn that resets (your steers
+and follow-ups, msg's messages, which it delivers as steers) stays queued past the reset and lands in the
+fresh context right after the reset message, in pi's usual order: steers first, one per turn, in the order
+they came, then follow-ups once the agent would stop. The agent answers each there. What arrived earlier in
+the run was answered before the reset, and the summary carries it (your messages verbatim, msg's in lookup's catch-up).
+
 **`/relay`, for you.**
 
 | command | does |
 |---|---|
-| `/relay [note]` | reset now. Busy: at the end of the current turn, with your note. Idle: starts a turn asking the agent to call `relay` with its note (yours is appended), and resets at the end of that turn either way. |
+| `/relay` | reset the context: the agent is asked to call `relay` with its handoff note, and the context resets at the end of that turn either way. It never cuts a run off: sent while the agent works, it waits for the run to end (with the loop on: for the point where the loop would prompt), then asks. If the agent resets on its own meanwhile (a nudge), that reset is yours too and nothing more happens. Esc drops it and says so; a second `/relay` is the same request. |
+| `/relay <text>` | resets nothing: answers `did you mean /relay on <text>? (/relay alone resets the context)`. |
 | `/relay on [goal]` | turn the loop on (no goal: the previous one, else the session's first message). Idle: starts working right away. |
 | `/relay off` | turn the loop off; the agent stops when it next would. |
-| `/relay status` | usage, next nudge, resets, loop state, session id. |
+| `/relay status` | usage, next nudge, resets, a `/relay` on its way, loop state, session id. |
 
 **The loop (opt-in).** While it's on, each time the agent is about to settle (`agent_before_settle`), relay
 appends a `[relay loop]` message (keep going toward the goal; when it's completely done, call relay with
@@ -50,9 +57,18 @@ appends a `[relay loop]` message (keep going toward the goal; when it's complete
 - `relay({ done: true })`
 - esc / abort (and stays off until `/relay on`)
 - `/relay off`
-- 3 error outcomes in a row (it waits 5 s, then 15 s, between them)
+- 4 error runs in a row. Each already includes pi's own retries of the provider call (3 tries from a 2 s
+  delay); after the 1st, 2nd and 3rd, the loop waits 1 min, 5 min, then 15 min before its next request, about
+  20 minutes of patience on top of pi's. The wait is at the start of that request, where esc stops the loop at once.
 - 3 loop prompts in a row answered without a single tool call (a stalled agent)
 - the reset cap, when one is set and the agent asks for one more reset
+
+**The loop waits for live subs.** A parent ends its turn while its subs (pi runs started from its bash,
+pfs forks) work, and msg wakes it when one asks, reports or dies. So while the session has a live sub, the
+loop doesn't prompt and counts nothing, neither a stall nor an error. A live sub is a msg presence record
+naming this session as its parent, with no `endedAt`, a heartbeat under 45 s old and a running pid. Relay reads
+msg's store read-only (`$PI_MSG_DIR`, else `$PI_CODING_AGENT_DIR/msg`, else `~/.pi/agent/msg`): one readdir of
+`sessions/`, and only the records rewritten in the last 45 s, and only when the loop is on and would act.
 
 In `pi -p`, the loop keeps the run alive; the process exits normally once the loop ends.
 
@@ -82,7 +98,9 @@ where it was.
 - **custom messages** `customType: "relay"`, `display: true`, the model-facing text in `content`, and
   `details: { kind: "nudge" | "reset" | "loop", percent?, n?, note?, goal? }` plus these extras:
   `step` (nudge), `errors` and `idle` (loop prompt), `stopped: "errors" | "stalled"` (the loop ended here),
-  `byUser: true` (a `/relay` reset, or the nudge asking the agent for its note). `percent` is floored to a tenth.
+  `byUser: true` (a reset you asked for with `/relay`, the agent's own included when it came while your `/relay`
+  waited, or the nudge asking the agent for its note). `percent` is floored to a tenth. A reset's `note` is
+  always the agent's handoff note; it's absent when the turn that reset for a `/relay` didn't call `relay`.
 - **a compaction** on each reset: retain-none (`firstKeptEntryId` is its own id), `fromHook: true`,
   `details: { relay: { n, percent?, note?, goal? } }`.
 - **custom entries** `customType: "relay"` (invisible to the model), the loop switch:
@@ -91,9 +109,10 @@ where it was.
 
 ## Caveats
 
-- An esc during the loop's error backoff takes effect when the backoff ends (at most 15 s): pi gives a
-  settling run no abort signal to listen to. The continuation is dropped either way.
-- `/relay` while idle costs one request on the full context (the agent writes its note); while busy it costs nothing.
+- `/relay` costs one request on the full context (the agent writes its note), after the run when the agent is working.
+- `/relay off` during an error backoff lets the waiting request go out first; esc stops it at once.
+- A `/relay` that waits for a run, and a backoff's wait, live in the session's process: pi-web disposing the
+  session, or a restart, drops them (the run ends with it).
 - Without a session file (`--no-session`) the summary can't include lookup's catch-up and says so.
 - The steps also start over after pi's own compactions, since the context shrank.
 

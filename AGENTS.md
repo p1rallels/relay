@@ -16,17 +16,20 @@ optional keep-going loop. No model call anywhere in relay; resets are instant.
 ## Layout
 
 - `src/core/` — pure functions, no pi imports: `steps` (nudge crossings), `state` (state folded from branch entries),
-  `summary` (the reset's catch-up text), `loop` (settle and tool decisions), `drafts` (boundary entries), `text`, `config`, `lookup`, `command`.
-- `src/catchup.ts` — the one impure helper: finds and runs `lookup` with a timeout.
+  `summary` (the reset's catch-up text), `loop` (settle and tool decisions), `request` (the human's /relay, command to reset),
+  `subs` (msg's presence records: what a live sub is), `drafts` (boundary entries), `text`, `config`, `lookup`, `command`.
+- `src/catchup.ts` and `src/subs.ts` — the impure helpers: find and run `lookup` with a timeout; read msg's store (read-only) for a live sub.
 - `src/extension.ts` — pi adapter only: events, the `relay` tool, `/relay`, status line.
 
 ## Rules
 
 - No module-level mutable state: pi-web runs many sessions in one Bun process with one module instance.
-  Persistent state lives on the session branch and is folded from it (`stateFrom`) on every event; the only
-  closure state is the reset queued between a relay call and its turn's end.
+  Persistent state lives on the session branch and is folded from it (`stateFrom`) on every event; closure state
+  is only what lives within one run: the relay call queued for its turn's end, the human's /relay from the command
+  to its reset, and a loop backoff from agent_before_settle to the next agent_start.
 - Every `continue: true` needs a guard. turn_end continues only right after a reset it just wrote; agent_before_settle
-  continues only while the loop is on, the run wasn't aborted, and the error/idle counters are under 3.
+  continues once for a /relay that waited for the run (the request moves on, so it can't repeat), and otherwise only
+  while the loop is on, no sub of the session is live, the run wasn't aborted, and the counters are under their caps (4 errors, 3 idle).
 - Never special-case a mode or pi-web. The same code must work in tui, rpc, print/json and SDK sessions.
 - Don't touch pi's own auto-compaction; it stays the safety net.
 - Entry shapes are a contract with pi-web and lookup (see README "What relay writes"). Add fields, never rename.

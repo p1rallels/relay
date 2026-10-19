@@ -1,6 +1,7 @@
 import type { RelayConfig } from "./config.ts";
 import type { StopReason } from "./entries.ts";
 import { MAX_ERRORS, MAX_IDLE } from "./loop.ts";
+import type { HumanRequest } from "./request.ts";
 import type { RelayState } from "./state.ts";
 import { nextStep } from "./steps.ts";
 
@@ -11,6 +12,9 @@ export const formatPercent = (percent: number): string => {
 	if (percent >= 10) return `${Math.floor(percent)}%`;
 	return `${Math.floor(percent * 10) / 10}%`;
 };
+
+/** Whole minutes, else seconds: 900000 → "15m", 5000 → "5s". */
+export const formatDuration = (ms: number): string => (ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000}m` : `${Math.round(ms / 1000)}s`);
 
 export const clipHead = (text: string, max: number): string => {
 	if (text.length <= max) return text;
@@ -85,6 +89,32 @@ export const stopReasonText = (reason: StopReason): string => STOP_TEXT[reason];
 
 export const loopStoppedText = (reason: StopReason): string => `[relay loop] stopped: ${stopReasonText(reason)}.`;
 
+/** For the human, when the loop waits before its next request. */
+export const backoffText = (errors: number, ms: number): string =>
+	`relay loop: the run failed (${errors} in a row; the loop stops at ${MAX_ERRORS}). trying again in ${formatDuration(ms)}; esc stops the loop.`;
+
+/** `/relay <text>` resets nothing: the text is most likely a goal that lost its `on`. */
+export const unknownCommandText = (text: string): string => `did you mean /relay on ${text}? (/relay alone resets the context)`;
+
+/** What the human is told about their /relay, from the command to the reset or the drop. */
+export const requestText = {
+	asked: (): string => "relay: the agent writes a handoff note, then the context resets at the end of its turn",
+	waiting: (): string => "relay: once the agent's run is done, it writes a handoff note and the context resets. esc drops this.",
+	duplicate: (request: HumanRequest): string =>
+		request === "after-run"
+			? "relay: already asked: the context resets once the agent's run is done"
+			: "relay: already asked: the context resets at the end of the agent's turn",
+	covered: (): string => "relay: the agent reset the context on its own; that was your /relay too",
+	aborted: (): string => "relay: the run was aborted, so your /relay was dropped. send /relay again to reset.",
+	failed: (): string => "relay: the agent's turn failed, so the context didn't reset. send /relay again to retry.",
+} as const;
+
+const REQUEST_STATUS: Readonly<Record<HumanRequest, string>> = {
+	"after-run": "a /relay waits for the agent's run to end",
+	"ask-sent": "a /relay asked the agent for its handoff note",
+	answering: "a /relay resets at the end of the agent's turn",
+};
+
 export const toolResultText = {
 	queued: (n: number): string =>
 		`reset #${n} queued: it happens as soon as this turn's tool calls finish, then you continue with a fresh context that opens with your note. don't start anything else in this turn.`,
@@ -107,9 +137,11 @@ export interface StatusInput {
 	readonly baselinePercent: number | undefined;
 	readonly state: RelayState;
 	readonly config: RelayConfig;
+	/** The human's /relay still on its way, if any. */
+	readonly request?: HumanRequest | undefined;
 }
 
-export const statusReport = ({ sessionId, percent, contextWindow, baselinePercent, state, config }: StatusInput): string => {
+export const statusReport = ({ sessionId, percent, contextWindow, baselinePercent, state, config, request }: StatusInput): string => {
 	const usage = percent === null || percent === undefined ? "context usage unknown until the next response" : `${formatPercent(percent)} of the context window`;
 	const window = contextWindow ? ` (${Math.round(contextWindow / 1000)}k tokens)` : "";
 	const next = formatPercent(nextStep(percent, state.lastNudgeStep, config.nudgeAt, config.nudgeEvery, baselinePercent));
@@ -119,7 +151,7 @@ export const statusReport = ({ sessionId, percent, contextWindow, baselinePercen
 		: `off${state.loop.stopped ? ` (${stopReasonText(state.loop.stopped)})` : ""}`;
 	return [
 		`relay: ${usage}${window}; next nudge at ${next} (first at ${formatPercent(config.nudgeAt)}, then every ${formatPercent(config.nudgeEvery)})`,
-		`resets: ${state.resets} (${cap})`,
+		`resets: ${state.resets} (${cap})${request === undefined ? "" : `; ${REQUEST_STATUS[request]}`}`,
 		`loop: ${loop}`,
 		`session: ${sessionId}`,
 	].join("\n");

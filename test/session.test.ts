@@ -1,9 +1,27 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { stepAt } from "../src/core/steps.ts";
 import { stateFrom } from "../src/core/state.ts";
-import { CONTEXT_WINDOW, call, calls, contextChars, type Harness, openSession, relayEntries, say, sessionFiles, textOf, waitFor } from "./harness.ts";
+import { requestText, unknownCommandText } from "../src/core/text.ts";
+import {
+	CONTEXT_WINDOW,
+	call,
+	calls,
+	captureTold,
+	contextChars,
+	gate,
+	type Harness,
+	openSession,
+	relayEntries,
+	say,
+	sessionFiles,
+	textOf,
+	waitFor,
+	writePresence,
+} from "./harness.ts";
 
-const ENV_KEYS = ["PI_RELAY_NUDGE_AT", "PI_RELAY_NUDGE_EVERY", "PI_RELAY_MAX_RESETS", "PI_RELAY_GOAL"] as const;
+const ENV_KEYS = ["PI_RELAY_NUDGE_AT", "PI_RELAY_NUDGE_EVERY", "PI_RELAY_MAX_RESETS", "PI_RELAY_GOAL", "PI_MSG_DIR"] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 const open: Harness[] = [];
 
@@ -28,6 +46,43 @@ afterEach(() => {
 
 /** ~5% of the 20k-token window per call. */
 const PAD = { chars: 4_000 };
+
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+const contentText = (content: unknown): string => {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part: unknown) => (typeof part === "object" && part !== null && "text" in part ? String(part.text) : "")).join("");
+};
+
+/** One line per entry, to read a branch's order at a glance: `user:hi`, `assistant:calling pad`, `relay:reset`, `compaction`. */
+const describeEntry = (entry: SessionEntry): string => {
+	switch (entry.type) {
+		case "compaction":
+			return "compaction";
+		case "custom_message":
+			return entry.customType === "relay" ? `relay:${(entry.details as { kind?: string }).kind}` : `${entry.customType}:${contentText(entry.content)}`;
+		case "message":
+			return `${entry.message.role}:${"content" in entry.message ? contentText(entry.message.content) : ""}`;
+		default:
+			return entry.type;
+	}
+};
+
+const branchLines = (h: Harness): string[] => h.session.sessionManager.getBranch().map(describeEntry);
+
+const isAsk = (entry: SessionEntry): boolean =>
+	entry.type === "custom_message" && entry.customType === "relay" && (entry.details as { kind?: string; byUser?: boolean }).kind === "nudge" && (entry.details as { byUser?: boolean }).byUser === true;
+
+const compactionOf = (entries: readonly SessionEntry[]) => {
+	const found = entries.filter((entry) => entry.type === "compaction");
+	const [first] = found;
+	if (found.length !== 1 || first?.type !== "compaction") throw new Error(`expected one compaction, found ${found.length}`);
+	return first;
+};
+
+/** The model-facing messages of a request, system prompt left out, as their text. */
+const requestTexts = (h: Harness, index: number): string[] => (h.requests[index]?.messages ?? []).filter((message) => message.role !== "system").map(textOf);
 
 describe("nudge", () => {
 	test("appears once per step, at the turn that crosses it, and reaches the model", async () => {
@@ -217,6 +272,62 @@ describe("loop", () => {
 		expect(h.requests).toHaveLength(2);
 	});
 
+	test("a live sub holds it: no prompt and no stall counted while the parent waits; once the sub ended it goes on", async () => {
+		env({ PI_RELAY_GOAL: "g" });
+		const h = await start();
+		const id = h.session.sessionManager.getSessionId();
+		writePresence(h.msgDir, "sub-1", { parent: id });
+		for (const wake of ["started a sub", "the sub asked something", "the sub asked again", "and again"]) {
+			h.respond([say(`waiting for my sub (${wake})`)]);
+			await h.session.prompt(wake);
+		}
+		expect(relayEntries(h.entries(), "loop")).toEqual([]);
+		expect(stateFrom(h.entries()).loop).toMatchObject({ on: true, idle: 0, errors: 0 });
+		expect(h.requests).toHaveLength(4);
+		writePresence(h.msgDir, "sub-1", { parent: id, endedAt: Date.now() });
+		h.respond([say("the sub is done"), call("relay", { note: "merged the sub's work", done: true }), say("bye")]);
+		await h.session.prompt("the sub ended");
+		expect(relayEntries(h.entries(), "loop").map((entry) => entry.details)).toEqual([{ kind: "loop", goal: "g", errors: 0, idle: 0 }]);
+		expect(stateFrom(h.entries()).loop).toMatchObject({ on: false, stopped: "done" });
+	});
+
+	test("someone else's sub, or a sub gone quiet, doesn't hold it", async () => {
+		env({ PI_RELAY_GOAL: "g" });
+		const h = await start();
+		writePresence(h.msgDir, "not-mine", { parent: "another-session" });
+		writePresence(h.msgDir, "quiet", { parent: h.session.sessionManager.getSessionId(), heartbeatAt: Date.now() - 60_000 });
+		h.respond([say("stopping"), call("relay", { note: "done", done: true }), say("bye")]);
+		await h.session.prompt("go");
+		expect(relayEntries(h.entries(), "loop")).toHaveLength(1);
+	});
+
+	test("an error run backs off before the next request, and esc during the wait stops the loop at once", async () => {
+		env({ PI_RELAY_GOAL: "g" });
+		const h = await start();
+		h.respond([fauxAssistantMessage("", { stopReason: "error", errorMessage: "faux outage" }), say("never answered")]);
+		const told = captureTold();
+		try {
+			const running = h.session.prompt("go");
+			const prompt = await waitFor("the loop's prompt after the error", () => relayEntries(h.entries(), "loop")[0]);
+			expect(prompt.details).toEqual({ kind: "loop", goal: "g", errors: 1, idle: 0 });
+			await sleep(300);
+			expect(h.requests).toHaveLength(1);
+			expect(h.session.isStreaming).toBe(true);
+			const escAt = Date.now();
+			await h.session.abort();
+			await running;
+			expect(Date.now() - escAt).toBeLessThan(2_000);
+			expect(told.lines()).toContain("relay loop: the run failed (1 in a row; the loop stops at 4). trying again in 1m; esc stops the loop.");
+		} finally {
+			told.restore();
+		}
+		expect(stateFrom(h.entries()).loop).toMatchObject({ on: false, stopped: "aborted" });
+		expect(relayEntries(h.entries(), "loop")).toHaveLength(1);
+		expect(h.requests).toHaveLength(1);
+		expect(branchLines(h).filter((line) => line.startsWith("assistant:"))).toEqual(["assistant:", "assistant:"]);
+		expect(h.session.isIdle).toBe(true);
+	});
+
 	test("/relay on starts it when idle; /relay off stops it", async () => {
 		env({});
 		const h = await start();
@@ -236,21 +347,187 @@ describe("loop", () => {
 });
 
 describe("human /relay", () => {
-	test("idle: asks the agent for its note, resets at the end of that turn, keeps both notes", async () => {
+	test("idle: asks the agent for its note and resets at the end of that turn, with the agent's note", async () => {
 		env({});
 		const h = await start();
 		h.respond([say("did a thing")]);
 		await h.session.prompt("do a thing");
 		h.respond([call("relay", { note: "AGENT-NOTE" }), say("caught up")]);
-		await h.session.prompt("/relay HUMAN-NOTE");
+		await h.session.prompt("/relay");
 		const compaction = await waitFor("the reset", () => h.entries().find((entry) => entry.type === "compaction"));
 		if (compaction.type !== "compaction") throw new Error("no compaction");
-		expect(compaction.summary).toContain("AGENT-NOTE");
-		expect(compaction.summary).toContain("the human's note with /relay: HUMAN-NOTE");
+		expect(compaction.summary).toContain("## handoff note\nAGENT-NOTE");
+		expect(compaction.summary).not.toContain("the human's note");
 		expect(compaction.summary).toContain("asked for by the human");
+		expect(compaction.details).toEqual({ relay: { n: 1, percent: expect.any(Number), note: "AGENT-NOTE" } });
 		const ask = relayEntries(h.entries(), "nudge")[0];
 		expect(ask?.details).toMatchObject({ kind: "nudge", byUser: true });
+		expect(relayEntries(h.entries(), "reset")[0]?.details).toMatchObject({ kind: "reset", n: 1, byUser: true });
 		await waitFor("the run after the reset", () => (h.requests.length >= 3 ? true : undefined));
+	});
+
+	test("/relay <text> resets nothing: it asks whether the text was a goal", async () => {
+		env({});
+		const h = await start();
+		h.respond([say("hello")]);
+		await h.session.prompt("hi");
+		const before = h.entries().length;
+		const told = captureTold();
+		try {
+			await h.session.prompt("/relay ship the parser");
+			h.respond([say("busy")]);
+			const running = h.session.prompt("work");
+			await h.session.prompt("/relay wrap up first");
+			await running;
+			expect(told.lines()).toContain(unknownCommandText("ship the parser"));
+			expect(told.lines()).toContain(unknownCommandText("wrap up first"));
+		} finally {
+			told.restore();
+		}
+		const added = h.entries().slice(before);
+		expect(added.some((entry) => entry.type === "compaction" || (entry.type === "custom_message" && entry.customType === "relay"))).toBe(false);
+		expect(h.requests).toHaveLength(2);
+	});
+
+	test("busy: waits for the run, then asks for the note; the run isn't cut off, and two /relay's are one", async () => {
+		env({});
+		const h = await start();
+		const first = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+			call("pad", { chars: 10 }),
+			say("RUN-DONE"),
+			call("relay", { note: "AGENT-NOTE: the run is done" }),
+			say("AFTER-RESET"),
+		]);
+		const told = captureTold();
+		try {
+			const running = h.session.prompt("work in three steps");
+			await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+			await h.session.prompt("/relay");
+			await h.session.prompt("/relay");
+			first.open();
+			await running;
+			expect(told.lines().filter((line) => line === requestText.waiting())).toHaveLength(1);
+			expect(told.lines().filter((line) => line === requestText.duplicate("after-run"))).toHaveLength(1);
+		} finally {
+			told.restore();
+		}
+		const lines = branchLines(h);
+		const done = lines.indexOf("assistant:RUN-DONE");
+		const asked = lines.indexOf("relay:nudge");
+		const reset = lines.indexOf("compaction");
+		expect(lines.filter((line) => line === "relay:nudge")).toHaveLength(1);
+		expect(done).toBeGreaterThan(0);
+		expect(lines.slice(0, done).filter((line) => line.startsWith("toolResult:"))).toHaveLength(2);
+		expect(asked).toBe(done + 1);
+		expect(reset).toBeGreaterThan(asked);
+		const compaction = compactionOf(h.entries());
+		expect(compaction.details).toMatchObject({ relay: { n: 1, note: "AGENT-NOTE: the run is done" } });
+		expect(relayEntries(h.entries(), "reset")[0]?.details).toMatchObject({ kind: "reset", byUser: true });
+		expect(h.entries().filter(isAsk)).toHaveLength(1);
+		expect(requestTexts(h, 3).at(-1)).toStartWith("[relay] the human asked for a context reset");
+		expect(requestTexts(h, 4)).toEqual([expect.stringContaining("The conversation history before this"), expect.stringContaining("[relay] context reset #1")]);
+		expect(lines.at(-1)).toBe("assistant:AFTER-RESET");
+		expect(h.requests).toHaveLength(5);
+		expect(h.errors).toEqual([]);
+	});
+
+	test("busy: a follow-up typed while the /relay waits is part of the run, answered before the ask", async () => {
+		env({});
+		const h = await start();
+		const first = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+			say("RUN-DONE"),
+			say("DID-FOLLOW-UP"),
+			call("relay", { note: "N" }),
+			say("AFTER-RESET"),
+		]);
+		const running = h.session.prompt("work");
+		await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+		await h.session.prompt("/relay");
+		await h.session.prompt("FOLLOW-UP: one more thing", { streamingBehavior: "followUp" });
+		first.open();
+		await running;
+		const lines = branchLines(h);
+		const followUp = lines.indexOf("user:FOLLOW-UP: one more thing");
+		expect(followUp).toBeGreaterThan(lines.indexOf("assistant:RUN-DONE"));
+		expect(lines.indexOf("assistant:DID-FOLLOW-UP")).toBe(followUp + 1);
+		expect(lines.indexOf("relay:nudge")).toBe(followUp + 2);
+		expect(lines.indexOf("compaction")).toBeGreaterThan(followUp + 2);
+		expect(compactionOf(h.entries()).details).toMatchObject({ relay: { note: "N" } });
+	});
+
+	test("busy: the agent resetting on its own first is the human's reset too, and nothing more happens after the run", async () => {
+		env({});
+		const h = await start();
+		const first = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+			call("relay", { note: "OWN-NOTE: nudged, so I handed off" }),
+			say("AFTER-RESET"),
+		]);
+		const told = captureTold();
+		try {
+			const running = h.session.prompt("work");
+			await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+			await h.session.prompt("/relay");
+			first.open();
+			await running;
+			expect(told.lines()).toContain(requestText.covered());
+		} finally {
+			told.restore();
+		}
+		await sleep(50);
+		expect(compactionOf(h.entries()).details).toMatchObject({ relay: { n: 1, note: "OWN-NOTE: nudged, so I handed off" } });
+		expect(relayEntries(h.entries(), "reset")[0]?.details).toMatchObject({ kind: "reset", byUser: true });
+		expect(h.entries().filter(isAsk)).toEqual([]);
+		expect(branchLines(h).at(-1)).toBe("assistant:AFTER-RESET");
+		expect(h.requests).toHaveLength(3);
+		h.respond([say("next")]);
+		await h.session.prompt("and now?");
+		expect(h.entries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	test("busy: an aborted run drops the request and says so; nothing resets later", async () => {
+		env({});
+		const h = await start();
+		const first = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+		]);
+		const told = captureTold();
+		try {
+			const running = h.session.prompt("work");
+			await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+			await h.session.prompt("/relay");
+			const aborting = h.session.abort();
+			first.open();
+			await aborting;
+			await running;
+			expect(told.lines()).toContain(requestText.aborted());
+		} finally {
+			told.restore();
+		}
+		h.respond([call("pad", { chars: 10 }), say("fine")]);
+		await h.session.prompt("go on");
+		await sleep(50);
+		expect(h.entries().filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(h.entries().filter(isAsk)).toEqual([]);
+		expect(branchLines(h).at(-1)).toBe("assistant:fine");
 	});
 
 	test("idle: resets at the end of the turn even if the agent doesn't call relay", async () => {
@@ -263,6 +540,103 @@ describe("human /relay", () => {
 		await waitFor("the reset", () => h.entries().find((entry) => entry.type === "compaction"));
 		await waitFor("the request after it", () => (h.requests.length >= 3 ? true : undefined));
 		expect(relayEntries(h.entries(), "reset")[0]?.details).toMatchObject({ kind: "reset", n: 1, byUser: true });
+	});
+});
+
+describe("queued messages survive a reset", () => {
+	/** How msg delivers into a working session: a custom message, deliverAs steer. */
+	const msgMessage = (text: string) => ({ customType: "msg", content: text, display: true, details: { kind: "message", text } });
+
+	test("a msg message, a steer and a follow-up queued in the relay tool's turn land in the fresh context, in order, each answered", async () => {
+		env({});
+		const h = await start();
+		const held = gate();
+		h.respond([
+			call("pad", { chars: 8_000 }),
+			async () => {
+				await held.opened;
+				return call("relay", { note: "Q-NOTE: padded; next: what the queue says" });
+			},
+			say("DID-MSG"),
+			say("DID-STEER"),
+			say("DID-FOLLOW-UP"),
+		]);
+		const running = h.session.prompt("pad, then relay");
+		await waitFor("the relay turn's request", () => (h.requests.length >= 2 ? true : undefined));
+		await h.session.sendCustomMessage(msgMessage("MSG-1: the sub reports"), { triggerTurn: true, deliverAs: "steer" });
+		await h.session.prompt("STEER-1: also check the logs", { streamingBehavior: "steer" });
+		await h.session.prompt("FOLLOW-UP-1: then summarize", { streamingBehavior: "followUp" });
+		expect(h.session.pendingMessageCount).toBe(2);
+		held.open();
+		await running;
+		const lines = branchLines(h);
+		const reset = lines.indexOf("compaction");
+		expect(reset).toBeGreaterThan(0);
+		expect(lines.slice(0, reset).some((line) => /MSG-1|STEER-1|FOLLOW-UP-1/.test(line))).toBe(false);
+		expect(lines.slice(reset)).toEqual([
+			"compaction",
+			"relay:reset",
+			"msg:MSG-1: the sub reports",
+			"assistant:DID-MSG",
+			"user:STEER-1: also check the logs",
+			"assistant:DID-STEER",
+			"user:FOLLOW-UP-1: then summarize",
+			"assistant:DID-FOLLOW-UP",
+		]);
+		const fresh = [expect.stringContaining("The conversation history before this"), expect.stringContaining("[relay] context reset #1")];
+		expect(requestTexts(h, 2)).toEqual([...fresh, "MSG-1: the sub reports"]);
+		expect(requestTexts(h, 3)).toEqual([...fresh, "MSG-1: the sub reports", "DID-MSG", "STEER-1: also check the logs"]);
+		expect(requestTexts(h, 4).at(-1)).toBe("FOLLOW-UP-1: then summarize");
+		expect(contextChars(h.requests[2]!)).toBeLessThan(contextChars(h.requests[1]!) / 2);
+		expect(h.session.pendingMessageCount).toBe(0);
+		expect(h.errors).toEqual([]);
+	});
+
+	test("what's typed while the agent writes its note for a /relay lands after that reset", async () => {
+		env({});
+		const h = await start();
+		const first = gate();
+		const note = gate();
+		h.respond([
+			async () => {
+				await first.opened;
+				return call("pad", { chars: 10 });
+			},
+			say("RUN-DONE"),
+			async () => {
+				await note.opened;
+				return call("relay", { note: "N" });
+			},
+			say("DID-STEER"),
+			say("DID-FOLLOW-UP"),
+		]);
+		const running = h.session.prompt("work");
+		await waitFor("the run's first request", () => (h.requests.length >= 1 ? true : undefined));
+		await h.session.prompt("/relay");
+		first.open();
+		await waitFor("the ask's turn", () => (h.requests.length >= 3 ? true : undefined));
+		await h.session.prompt("STEER-2", { streamingBehavior: "steer" });
+		await h.session.prompt("FOLLOW-UP-2", { streamingBehavior: "followUp" });
+		note.open();
+		await running;
+		const lines = branchLines(h);
+		expect(lines.slice(lines.indexOf("relay:nudge"))).toEqual([
+			"relay:nudge",
+			"assistant:calling relay",
+			expect.stringMatching(/^toolResult:reset #1 queued/),
+			"compaction",
+			"relay:reset",
+			"user:STEER-2",
+			"assistant:DID-STEER",
+			"user:FOLLOW-UP-2",
+			"assistant:DID-FOLLOW-UP",
+		]);
+		expect(requestTexts(h, 3)).toEqual([
+			expect.stringContaining("The conversation history before this"),
+			expect.stringContaining("[relay] context reset #1"),
+			"STEER-2",
+		]);
+		expect(relayEntries(h.entries(), "reset")[0]?.details).toMatchObject({ byUser: true, note: "N" });
 	});
 });
 

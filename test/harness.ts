@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { spyOn } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AssistantMessage, type FauxResponseStep, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
@@ -41,6 +42,8 @@ const probe =
 export interface Harness {
 	readonly session: AgentSession;
 	readonly sessions: string;
+	/** msg's store for this session ($PI_MSG_DIR), empty until a test writes presence records into it. */
+	readonly msgDir: string;
 	readonly requests: TranscriptContext[];
 	/** Context usage seen at each turn_end, in order. */
 	readonly percents: (number | null)[];
@@ -67,16 +70,19 @@ interface World {
 	readonly cwd: string;
 	readonly agentDir: string;
 	readonly sessions: string;
+	readonly msgDir: string;
 }
 
 const makeWorld = (): World => {
 	const base = mkdtempSync(join(tmpdir(), "relay-test-"));
-	const world = { base, cwd: join(base, "cwd"), agentDir: join(base, "agent"), sessions: join(base, "sessions") };
-	for (const dir of [world.cwd, world.agentDir, world.sessions]) mkdirSync(dir, { recursive: true });
+	const world = { base, cwd: join(base, "cwd"), agentDir: join(base, "agent"), sessions: join(base, "sessions"), msgDir: join(base, "msg") };
+	for (const dir of [world.cwd, world.agentDir, world.sessions, join(world.msgDir, "sessions")]) mkdirSync(dir, { recursive: true });
 	return world;
 };
 
 const open = async (world: World, manager: SessionManager, mode: ExtensionMode): Promise<Harness> => {
+	// relay looks for live subs in msg's store: keep it to this world, never the machine's
+	process.env.PI_MSG_DIR = world.msgDir;
 	const requests: TranscriptContext[] = [];
 	const percents: (number | null)[] = [];
 	const errors: string[] = [];
@@ -123,6 +129,7 @@ const open = async (world: World, manager: SessionManager, mode: ExtensionMode):
 	const harness: Harness = {
 		session,
 		sessions: world.sessions,
+		msgDir: world.msgDir,
 		requests,
 		percents,
 		errors,
@@ -164,6 +171,35 @@ export const relayEntries = (entries: readonly SessionEntry[], kind?: string) =>
 		(entry): entry is Extract<SessionEntry, { type: "custom_message" }> =>
 			entry.type === "custom_message" && entry.customType === "relay" && (kind === undefined || (entry.details as { kind?: string } | undefined)?.kind === kind),
 	);
+
+/** A promise a scripted response can wait on, so a test can act while the agent is mid-request. */
+export const gate = (): { readonly opened: Promise<void>; readonly open: () => void } => {
+	let open: () => void = () => {};
+	const opened = new Promise<void>((done) => {
+		open = done;
+	});
+	return { opened, open };
+};
+
+/** What relay told the human: without a UI, its notices go to stderr. */
+export const captureTold = (): { readonly lines: () => string[]; readonly restore: () => void } => {
+	const spy = spyOn(process.stderr, "write");
+	return { lines: () => spy.mock.calls.map(([chunk]) => String(chunk).trimEnd()), restore: () => spy.mockRestore() };
+};
+
+export interface PresencePatch {
+	readonly parent: string;
+	readonly endedAt?: number;
+	readonly heartbeatAt?: number;
+	readonly pid?: number;
+}
+
+/** A msg presence record (msg's README "Store"), as a sub started from `parent`'s bash keeps it. */
+export const writePresence = (msgDir: string, id: string, patch: PresencePatch): void => {
+	const now = Date.now();
+	const presence = { v: 1, id, cwd: "/tmp/fork", pid: process.pid, mode: "print", activity: "busy", startedAt: now - 5_000, heartbeatAt: now, ...patch };
+	writeFileSync(join(msgDir, "sessions", `${id}.json`), `${JSON.stringify(presence)}\n`);
+};
 
 export const waitFor = async <T>(what: string, probe: () => T | undefined, timeoutMs = 5_000): Promise<T> => {
 	const deadline = Date.now() + timeoutMs;

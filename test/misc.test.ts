@@ -3,17 +3,24 @@ import { parseCommand } from "../src/core/command.ts";
 import { loopStopDrafts, nudgeDraft, resetDrafts } from "../src/core/drafts.ts";
 import { catchupArgs, commandLine, findLookup, searchArgs, shellQuote } from "../src/core/lookup.ts";
 import { INITIAL_STATE } from "../src/core/state.ts";
-import { formatPercent, loopText, statusLine, statusReport } from "../src/core/text.ts";
+import { backoffText, formatDuration, formatPercent, loopText, statusLine, statusReport, unknownCommandText } from "../src/core/text.ts";
 
 describe("parseCommand", () => {
-	test("subcommands and notes", () => {
-		expect(parseCommand("")).toEqual({ kind: "reset", note: "" });
-		expect(parseCommand("  wrap up the parser first ")).toEqual({ kind: "reset", note: "wrap up the parser first" });
+	test("only a bare /relay resets", () => {
+		expect(parseCommand("")).toEqual({ kind: "reset" });
+		expect(parseCommand("   ")).toEqual({ kind: "reset" });
+	});
+	test("subcommands", () => {
 		expect(parseCommand("on")).toEqual({ kind: "on", goal: undefined });
 		expect(parseCommand("ON  ship the canvas view ")).toEqual({ kind: "on", goal: "ship the canvas view" });
 		expect(parseCommand("off")).toEqual({ kind: "off" });
 		expect(parseCommand("status")).toEqual({ kind: "status" });
-		expect(parseCommand("online docs are stale")).toEqual({ kind: "reset", note: "online docs are stale" });
+	});
+	test("any other text is not a reset: it's answered with a hint", () => {
+		expect(parseCommand("  wrap up the parser first ")).toEqual({ kind: "unknown", text: "wrap up the parser first" });
+		expect(parseCommand("online docs are stale")).toEqual({ kind: "unknown", text: "online docs are stale" });
+		expect(parseCommand("reset")).toEqual({ kind: "unknown", text: "reset" });
+		expect(unknownCommandText("ship the parser")).toBe("did you mean /relay on ship the parser? (/relay alone resets the context)");
 	});
 });
 
@@ -57,7 +64,7 @@ describe("drafts", () => {
 		const [sw, message] = loopStopDrafts("errors", "g");
 		expect(sw).toEqual({ type: "custom", customType: "relay", data: { loop: "off", reason: "errors" } });
 		expect(message.details).toEqual({ kind: "loop", goal: "g", stopped: "errors" });
-		expect(message.content).toBe("[relay loop] stopped: 3 errors in a row.");
+		expect(message.content).toBe("[relay loop] stopped: 4 errors in a row.");
 	});
 });
 
@@ -73,9 +80,18 @@ describe("text", () => {
 		expect(statusLine(null, true)).toBe("relay · loop");
 		expect(statusLine(undefined, false)).toBe("relay");
 	});
+	test("durations", () => {
+		expect(formatDuration(60_000)).toBe("1m");
+		expect(formatDuration(900_000)).toBe("15m");
+		expect(formatDuration(5_000)).toBe("5s");
+		expect(formatDuration(90_000)).toBe("90s");
+	});
+	test("the human hears when the loop backs off, and that esc stops it", () => {
+		expect(backoffText(2, 300_000)).toBe("relay loop: the run failed (2 in a row; the loop stops at 4). trying again in 5m; esc stops the loop.");
+	});
 	test("loop prompt: long goals are clipped, trouble is counted", () => {
 		const text = loopText("x".repeat(1000), 2, 0);
-		expect(text).toContain("the last request failed (2 in a row; the loop stops at 3)");
+		expect(text).toContain("the last request failed (2 in a row; the loop stops at 4)");
 		expect(text).toContain("[…600 more chars]");
 		expect(loopText(undefined, 0, 1)).toContain("you stopped without calling a tool (1 in a row");
 		expect(loopText(undefined, 0, 0)).toContain("the task in this session's first user message");
@@ -97,5 +113,17 @@ describe("text", () => {
 				"session: abc",
 			].join("\n"),
 		);
+	});
+	test("status report: a /relay on its way", () => {
+		const report = statusReport({
+			sessionId: "abc",
+			percent: 43,
+			contextWindow: 200_000,
+			baselinePercent: undefined,
+			state: INITIAL_STATE,
+			config: { nudgeAt: 40, nudgeEvery: 5, maxResets: 2, goal: undefined },
+			request: "after-run",
+		});
+		expect(report.split("\n")[1]).toBe("resets: 0 (cap 2); a /relay waits for the agent's run to end");
 	});
 });

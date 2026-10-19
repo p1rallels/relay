@@ -18,7 +18,9 @@ export interface SummaryInput {
 	/** The goal from /relay on or the launch; undefined means the first user message is the goal. */
 	readonly goal: string | undefined;
 	readonly userMessages: readonly UserMessage[];
+	/** The agent's handoff note; empty when it didn't write one (a /relay whose turn didn't call relay). */
 	readonly note: string;
+	/** The human asked for this reset with /relay. */
 	readonly byUser: boolean;
 	readonly catchup: Catchup;
 	/** How to search the session, e.g. `lookup --root <dir> search '<term>' --session <id>`. */
@@ -81,8 +83,8 @@ const userSection = (input: SummaryInput): string => {
 
 const noteSection = (input: SummaryInput): string => {
 	const note = input.note.trim();
-	const title = input.byUser ? "## handoff note (from the human's /relay)" : "## handoff note";
-	return `${title}\n${note === "" ? "(none)" : clipHead(note, NOTE_BUDGET)}`;
+	if (note !== "") return `## handoff note\n${clipHead(note, NOTE_BUDGET)}`;
+	return `## handoff note\n(none${input.byUser ? ": the human asked for this reset with /relay and the agent didn't write one" : ""})`;
 };
 
 const catchupSection = (catchup: Catchup): string => {

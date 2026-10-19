@@ -4,21 +4,22 @@ import { locateLookup, runCatchup, searchCommand } from "./catchup.ts";
 import { parseCommand, SUBCOMMANDS } from "./core/command.ts";
 import { readConfig, type RelayConfig, SETTINGS } from "./core/config.ts";
 import { humanAskDraft, loopDraft, loopOnDraft, loopStopDrafts, nudgeDraft, resetDrafts } from "./core/drafts.ts";
-import { CUSTOM_TYPE, type Entry, type LoopSwitch, TOOL_NAME, type ToolDetails, userMessages } from "./core/entries.ts";
-import { launchGoalApplies, settleDecision, toolDecision } from "./core/loop.ts";
+import { CUSTOM_TYPE, type Entry, isHandoffAsk, type LoopSwitch, TOOL_NAME, type ToolDetails, userMessages } from "./core/entries.ts";
+import { launchGoalApplies, loopDecides, settleDecision, toolDecision } from "./core/loop.ts";
+import { askDelivered, beforeSettleStep, commandStep, type HumanRequest, settledStep, turnStep } from "./core/request.ts";
 import { type RelayState, stateFrom } from "./core/state.ts";
 import { baselinePercent, dueStep } from "./core/steps.ts";
 import { buildSummary } from "./core/summary.ts";
-import { statusLine, statusReport, stopReasonText, toolResultText } from "./core/text.ts";
+import { backoffText, requestText, statusLine, statusReport, stopReasonText, toolResultText, unknownCommandText } from "./core/text.ts";
+import { hasLiveSub } from "./subs.ts";
 
 const STATUS_KEY = "relay";
 
-/** A reset asked for in this turn (relay tool or /relay); it happens at the turn's end. */
-interface PendingReset {
+/** What a reset writes into its summary besides the session's own facts. */
+interface ResetRequest {
+	/** The agent's handoff note; empty when the turn that reset didn't call relay. */
 	readonly note: string;
 	readonly byUser: boolean;
-	/** The agent called relay this turn: a further call is a no-op. */
-	readonly agentCalled: boolean;
 }
 
 const FLAG_HELP: Readonly<Record<keyof typeof SETTINGS, string>> = {
@@ -28,7 +29,18 @@ const FLAG_HELP: Readonly<Record<keyof typeof SETTINGS, string>> = {
 	goal: "relay: keep-going loop toward this goal until the agent calls relay with done: true",
 };
 
-const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+/** Resolves after `ms`, or as soon as `signal` aborts. */
+const sleep = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
+	new Promise((done) => {
+		if (signal?.aborted) return done();
+		const finish = (): void => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			done();
+		};
+		const timer = setTimeout(finish, ms);
+		signal?.addEventListener("abort", finish, { once: true });
+	});
 
 const percentOf = (ctx: ExtensionContext): number | undefined => ctx.getContextUsage()?.percent ?? undefined;
 
@@ -36,18 +48,24 @@ const stateOf = (ctx: ExtensionContext): RelayState => stateFrom(ctx.sessionMana
 
 const toolText = (text: string) => [{ type: "text" as const, text }];
 
-const mergeNotes = (agentNote: string, earlier: PendingReset | undefined): string => {
-	const human = earlier?.byUser ? earlier.note.trim() : "";
-	return human === "" ? agentNote : `${agentNote}\n\nthe human's note with /relay: ${human}`;
-};
-
 export default function relayLoop(pi: ExtensionAPI): void {
 	for (const [key, setting] of Object.entries(SETTINGS) as [keyof typeof SETTINGS, (typeof SETTINGS)[keyof typeof SETTINGS]][]) {
 		pi.registerFlag(setting.flag, { type: "string", description: FLAG_HELP[key] });
 	}
 
-	/** Per session (this closure), transient: lives from a relay call or /relay to the next turn_end. */
-	let pending: PendingReset | undefined;
+	// Per session (this closure) and transient: none of it outlives the run it belongs to.
+	/** The relay tool's call in the current turn: the reset happens at the turn's end. */
+	let queued: { readonly note: string } | undefined;
+	/** The human's /relay, from the command to its reset (core/request.ts). */
+	let request: HumanRequest | undefined;
+	/** The loop continued after an error run: its next request waits this long, where esc can cut the wait short. */
+	let backoff: number | undefined;
+
+	const forget = (): void => {
+		queued = undefined;
+		request = undefined;
+		backoff = undefined;
+	};
 
 	const config = (): RelayConfig => readConfig(process.env, (name) => pi.getFlag(name)).config;
 
@@ -71,7 +89,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 	const switchLoop = (data: LoopSwitch): void => pi.appendEntry(CUSTOM_TYPE, data);
 
 	pi.on("session_start", (_event, ctx) => {
-		pending = undefined;
+		forget();
 		const { config: current, warnings } = readConfig(process.env, (name) => pi.getFlag(name));
 		for (const warning of warnings) tell(ctx, `relay: ${warning}`, "warning");
 		const state = stateOf(ctx);
@@ -83,10 +101,10 @@ export default function relayLoop(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
-		pending = undefined;
+		forget();
 	});
 
-	const resetDraftsFor = async (ctx: ExtensionContext, request: PendingReset, branch: readonly Entry[], state: RelayState, percent: number | undefined) => {
+	const resetDraftsFor = async (ctx: ExtensionContext, reset: ResetRequest, branch: readonly Entry[], state: RelayState, percent: number | undefined) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		const lookup = locateLookup({ sessionId, sessionFile });
@@ -99,12 +117,12 @@ export default function relayLoop(pi: ExtensionAPI): void {
 			sessionFile,
 			goal,
 			userMessages: userMessages(branch),
-			note: request.note,
-			byUser: request.byUser,
+			note: reset.note,
+			byUser: reset.byUser,
 			catchup: await runCatchup(lookup, sessionId),
 			searchCommand: searchCommand(lookup, sessionId),
 		});
-		return resetDrafts({ n, percent, note: request.note, goal, byUser: request.byUser, summary });
+		return resetDrafts({ n, percent, note: reset.note, goal, byUser: reset.byUser, summary });
 	};
 
 	const nudgeDraftFor = (ctx: ExtensionContext, state: RelayState, percent: number | undefined) => {
@@ -116,36 +134,60 @@ export default function relayLoop(pi: ExtensionAPI): void {
 	};
 
 	pi.on("turn_end", async (event, ctx) => {
-		const request = pending;
-		pending = undefined;
 		const aborted = event.outcome === "aborted" || ctx.signal?.aborted === true;
+		const step = turnStep(request, queued?.note, aborted ? "aborted" : event.outcome);
+		queued = undefined;
 		const percent = percentOf(ctx);
 		const branch = ctx.sessionManager.getBranch();
 		const state = stateFrom(branch);
-		if (request && !aborted) {
+		if (step.reset) {
+			const before = request;
+			const drafts = await resetDraftsFor(ctx, step, branch, state, percent);
+			// a /relay that came in while this reset was being written is this reset's too
+			if (step.covered || request !== before) tell(ctx, requestText.covered());
+			request = undefined;
 			showStatus(ctx, undefined, state.loop.on);
-			return { entries: [...event.entries, ...(await resetDraftsFor(ctx, request, branch, state, percent))], continue: true };
+			return { entries: [...event.entries, ...drafts], continue: true };
 		}
+		request = step.request;
 		showStatus(ctx, percent, state.loop.on);
 		const nudge = aborted ? undefined : nudgeDraftFor(ctx, state, percent);
 		return nudge ? { entries: [...event.entries, nudge] } : undefined;
 	});
 
+	pi.on("message_end", (event) => {
+		if (isHandoffAsk(event.message)) request = askDelivered(request);
+	});
+
 	pi.on("agent_before_settle", async (event, ctx) => {
 		if (event.continue || event.context.pendingMessages.length > 0 || ctx.signal?.aborted === true) return undefined;
+		const asked = beforeSettleStep(request);
+		request = asked.request;
+		if (asked.ask) return { entries: [...event.entries, humanAskDraft(percentOf(ctx))], continue: true };
 		const state = stateOf(ctx);
-		const decision = settleDecision(state.loop, event.outcome);
+		const liveSubs = loopDecides(state.loop, event.outcome) && (await hasLiveSub(ctx.sessionManager.getSessionId()));
+		const decision = settleDecision(state.loop, event.outcome, liveSubs);
 		switch (decision.action) {
 			case "none":
+			case "wait":
 				return undefined;
 			case "stop":
 				showStatus(ctx, percentOf(ctx), false);
 				tell(ctx, `relay loop stopped: ${stopReasonText(decision.reason)}`, "warning");
 				return { entries: [...event.entries, ...loopStopDrafts(decision.reason, state.loop.goal)] };
 			case "continue":
-				if (decision.backoffMs > 0) await sleep(decision.backoffMs);
+				backoff = decision.backoffMs > 0 ? decision.backoffMs : undefined;
+				if (backoff !== undefined) tell(ctx, backoffText(decision.errors, backoff), "warning");
 				return { entries: [...event.entries, loopDraft(state.loop.goal, decision.errors, decision.idle)], continue: true };
 		}
+	});
+
+	// The backoff waits here, at the start of the continued run, not in agent_before_settle: only a running
+	// agent has an abort signal, so esc ends the wait at once and the loop stops.
+	pi.on("agent_start", async (_event, ctx) => {
+		const wait = backoff;
+		backoff = undefined;
+		if (wait !== undefined) await sleep(wait, ctx.signal);
 	});
 
 	const askForHandoff = (percent: number | undefined): void => {
@@ -154,8 +196,8 @@ export default function relayLoop(pi: ExtensionAPI): void {
 	};
 
 	pi.on("agent_settled", (event, ctx) => {
-		const leftover = pending;
-		pending = undefined;
+		queued = undefined;
+		backoff = undefined;
 		const state = stateOf(ctx);
 		const percent = percentOf(ctx);
 		if (event.aborted && state.loop.on) {
@@ -163,10 +205,18 @@ export default function relayLoop(pi: ExtensionAPI): void {
 			tell(ctx, "relay loop off: the run was aborted. /relay on resumes it.", "warning");
 		}
 		showStatus(ctx, percent, state.loop.on && !event.aborted);
-		// a /relay that came after the run's last turn ended: start a turn for it (pi defers this until settled)
-		if (leftover?.byUser && !event.aborted) {
-			pending = leftover;
-			askForHandoff(percent);
+		const step = settledStep(request, event.aborted);
+		request = step.request;
+		switch (step.action) {
+			case "none":
+				return;
+			case "ask":
+				// the run's last boundary didn't ask (pi skipped it): start a turn for it, which pi defers until settled
+				return askForHandoff(percent);
+			case "aborted":
+				return tell(ctx, requestText.aborted(), "warning");
+			case "failed":
+				return tell(ctx, requestText.failed(), "warning");
 		}
 	});
 
@@ -192,7 +242,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const note = params.note.trim();
 			const state = stateOf(ctx);
-			const decision = toolDecision(params.done === true, pending?.agentCalled === true, state, config());
+			const decision = toolDecision(params.done === true, queued !== undefined, state, config());
 			const result = (text: string, details: ToolDetails) => ({ content: toolText(text), details });
 			switch (decision.outcome) {
 				case "duplicate":
@@ -205,14 +255,14 @@ export default function relayLoop(pi: ExtensionAPI): void {
 					return result(toolResultText.capped(decision.max), { outcome: "capped", ...(note ? { note } : {}) });
 				case "queued":
 					if (note === "") throw new Error("note is empty: write what's done, what's next, gotchas and where things are, then call relay again");
-					pending = { note: mergeNotes(note, pending), byUser: pending?.byUser === true, agentCalled: true };
+					queued = { note };
 					return result(toolResultText.queued(decision.n), { outcome: "queued", note, n: decision.n });
 			}
 		},
 	});
 
 	pi.registerCommand("relay", {
-		description: "relay: /relay [note] resets the context now · /relay on [goal] · /relay off · /relay status",
+		description: "relay: /relay resets the context (after the agent's run, if it's working) · /relay on [goal] · /relay off · /relay status",
 		getArgumentCompletions: (prefix) => {
 			const matches = SUBCOMMANDS.filter((name) => name.startsWith(prefix.trim().toLowerCase()));
 			return matches.length > 0 ? matches.map((name) => ({ value: name, label: name })) : null;
@@ -231,6 +281,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 						baselinePercent: baselinePercent(state.baselineTokens, usage?.contextWindow),
 						state,
 						config: config(),
+						request,
 					});
 					tell(ctx, report);
 					return;
@@ -250,11 +301,20 @@ export default function relayLoop(pi: ExtensionAPI): void {
 					pi.sendMessage({ customType: kickoff.customType, content: kickoff.content, display: kickoff.display, details: kickoff.details }, { triggerTurn: true });
 					return;
 				}
+				case "unknown":
+					return tell(ctx, unknownCommandText(command.text), "warning");
 				case "reset": {
-					pending = { note: command.note, byUser: true, agentCalled: false };
-					if (!ctx.isIdle()) return tell(ctx, "relay: the context resets when the agent's current turn ends");
-					askForHandoff(percent);
-					return tell(ctx, "relay: the agent writes a handoff note, then the context resets at the end of its turn");
+					const step = commandStep(request, !ctx.isIdle());
+					request = step.request;
+					switch (step.action) {
+						case "duplicate":
+							return tell(ctx, requestText.duplicate(step.request));
+						case "wait":
+							return tell(ctx, requestText.waiting());
+						case "ask":
+							askForHandoff(percent);
+							return tell(ctx, requestText.asked());
+					}
 				}
 			}
 		},

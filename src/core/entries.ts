@@ -93,6 +93,14 @@ export const relayMessage = (entry: Entry): RelayDetails | undefined => {
 	};
 };
 
+/** A message in the context (not an entry) that is relay's ask for a handoff note, sent for the human's /relay. */
+export const isHandoffAsk = (message: unknown): boolean => {
+	const fields = record(message);
+	if (fields?.role !== "custom" || fields.customType !== CUSTOM_TYPE) return false;
+	const details = record(fields.details);
+	return details?.kind === "nudge" && details.byUser === true;
+};
+
 export const relayCompaction = (entry: Entry): CompactionRelay | undefined => {
 	if (entry.type !== "compaction") return undefined;
 	const relay = record(record(entry.details)?.relay);

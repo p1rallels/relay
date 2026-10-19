@@ -1,29 +1,40 @@
 import type { RelayConfig } from "./config.ts";
 import type { LoopState, RelayState } from "./state.ts";
 
-export const MAX_ERRORS = 3;
+/**
+ * Error runs in a row that stop the loop. Each one already includes pi's own retries of the provider
+ * call; the loop waits BACKOFF_MS between them, so a short provider outage doesn't end an overnight loop.
+ */
+export const MAX_ERRORS = 4;
 export const MAX_IDLE = 3;
-/** Wait before continuing after the 1st and 2nd error outcome in a row; the 3rd stops the loop. */
-export const BACKOFF_MS: readonly number[] = [5_000, 15_000];
+/** Wait before the next request after the 1st, 2nd and 3rd error run in a row: about 20 minutes in all. */
+export const BACKOFF_MS: readonly number[] = [60_000, 300_000, 900_000];
 
 export type Outcome = "completed" | "aborted" | "error";
 
 export type SettleDecision =
 	| { readonly action: "none" }
+	/** A sub of this session is live: it wakes the session when it asks, reports or dies, so the loop holds and counts nothing. */
+	| { readonly action: "wait" }
 	| { readonly action: "continue"; readonly errors: number; readonly idle: number; readonly backoffMs: number }
 	| { readonly action: "stop"; readonly reason: "errors" | "stalled" };
 
 const NONE: SettleDecision = { action: "none" };
+const WAIT: SettleDecision = { action: "wait" };
 
 export const backoffMs = (errors: number): number => (errors <= 0 ? 0 : (BACKOFF_MS[Math.min(errors, BACKOFF_MS.length) - 1] ?? 0));
 
+/** Whether the loop has anything to decide when the agent is about to settle; only then is it worth looking for live subs. */
+export const loopDecides = (loop: LoopState, outcome: Outcome): boolean => loop.on && outcome !== "aborted";
+
 /**
- * What the loop does when the agent is about to settle. It only ever continues while it is on and
- * the run was not aborted, and every continuation is counted, so it cannot spin forever on errors
- * or on an agent that keeps answering without doing anything.
+ * What the loop does when the agent is about to settle. It only ever continues while it is on, the
+ * run was not aborted and no sub of the session is live, and every continuation is counted, so it
+ * cannot spin forever on errors or on an agent that keeps answering without doing anything.
  */
-export const settleDecision = (loop: LoopState, outcome: Outcome): SettleDecision => {
-	if (!loop.on || outcome === "aborted") return NONE;
+export const settleDecision = (loop: LoopState, outcome: Outcome, liveSubs = false): SettleDecision => {
+	if (!loopDecides(loop, outcome)) return NONE;
+	if (liveSubs) return WAIT;
 	if (outcome === "error") {
 		const errors = loop.errors + 1;
 		if (errors >= MAX_ERRORS) return { action: "stop", reason: "errors" };
