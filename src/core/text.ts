@@ -1,4 +1,4 @@
-import type { RelayConfig } from "./config.ts";
+import { type ConfigRule, formatWindow, type RelayConfig } from "./config.ts";
 import type { StopReason } from "./entries.ts";
 import { MAX_ERRORS, MAX_IDLE } from "./loop.ts";
 import type { HumanRequest } from "./request.ts";
@@ -141,9 +141,27 @@ export interface StatusInput {
 	readonly config: RelayConfig;
 	/** The human's /relay still on its way, if any. */
 	readonly request?: HumanRequest | undefined;
+	readonly source?: ConfigSource | undefined;
 }
 
-export const statusReport = ({ sessionId, percent, contextWindow, baselinePercent, state, config, request }: StatusInput): string => {
+/** Where the settings came from, for /relay status. */
+export interface ConfigSource {
+	readonly path: string;
+	readonly found: boolean;
+	readonly rule: { readonly index: number; readonly rule: ConfigRule } | undefined;
+	readonly warnings: readonly string[];
+}
+
+const ruleText = (rule: ConfigRule): string =>
+	[rule.model === undefined ? [] : [`model ${rule.model}`], rule.window === undefined ? [] : [`window ${formatWindow(rule.window)}`]].flat().join(", ") || "any model";
+
+const sourceLines = (source: ConfigSource | undefined): string[] => {
+	if (source === undefined) return [];
+	const applied = !source.found ? "not found, defaults" : source.rule ? `rule ${source.rule.index + 1}: ${ruleText(source.rule.rule)}` : "no rule matched";
+	return [`config: ${source.path} (${applied})`, ...source.warnings.map((warning) => `config warning: ${warning}`)];
+};
+
+export const statusReport = ({ sessionId, percent, contextWindow, baselinePercent, state, config, request, source }: StatusInput): string => {
 	const usage = percent === null || percent === undefined ? "context usage unknown until the next response" : `${formatPercent(percent)} of the context window`;
 	const window = contextWindow ? ` (${Math.round(contextWindow / 1000)}k tokens)` : "";
 	const next = formatPercent(nextStep(percent, state.lastNudgeStep, config.nudgeAt, config.nudgeEvery, baselinePercent));
@@ -156,5 +174,6 @@ export const statusReport = ({ sessionId, percent, contextWindow, baselinePercen
 		`resets: ${state.resets} (${cap})${request === undefined ? "" : `; ${REQUEST_STATUS[request]}`}`,
 		`loop: ${loop}`,
 		`session: ${sessionId}`,
+		...sourceLines(source),
 	].join("\n");
 };

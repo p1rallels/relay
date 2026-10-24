@@ -82,6 +82,35 @@ In `pi -p`, the loop keeps the run alive; the process exits normally once the lo
 
 ## Config
 
+The one place to set things is `~/.pi/agent/extensions/relay-loop/config.json` (under `$PI_CODING_AGENT_DIR`
+when that's set; `PI_RELAY_CONFIG` points elsewhere). pi doesn't load it as an extension, since the folder
+has no `index.ts`. Relay reads it at every check, so edits apply from the next turn without a restart, and a
+`/model` switch picks up that model's rule.
+
+```json
+{
+  "nudgeAt": 40,
+  "nudgeEvery": 5,
+  "maxResets": 10,
+  "rules": [
+    { "model": "openrouter/*", "window": "1m", "nudgeAt": 50 },
+    { "window": "1m", "nudgeAt": 40 },
+    { "window": "272k", "nudgeAt": 95, "nudgeEvery": 2 }
+  ]
+}
+```
+
+Every field is optional. Rules are checked top-down and the first match wins. A rule matches when all of
+its matchers hold: `model` is a glob (`*`, case-insensitive) on `provider/id` or `id`, and `window` is the
+model's context window in tokens (`272000`, `"272k"`, `"1m"`), within ±10% so `"1m"` also covers
+1,048,576 and 1,050,000. The same id can have different windows on different providers (`gpt-5.5` is 272k
+on `openai-codex`, 1.05M on openrouter), which `window` tells apart. A matched rule sets `nudgeAt` and/or
+`nudgeEvery`; the ones it leaves out come from the top level, then the defaults. Bad JSON, unknown keys
+and bad values are ignored with a warning at session start and in `/relay status`, which also names the
+rule that applied.
+
+The environment and flags override the file for one process (tests, headless runs):
+
 | env | flag | default |
 |---|---|---|
 | `PI_RELAY_NUDGE_AT` | `--relay-nudge-at` | `40` (% of the context window; decimals ok) |
@@ -89,7 +118,7 @@ In `pi -p`, the loop keeps the run alive; the process exits normally once the lo
 | `PI_RELAY_MAX_RESETS` | `--relay-max-resets` | no cap (`0` allows none) |
 | `PI_RELAY_GOAL` | `--relay-goal` | loop off |
 
-Flags win over the environment. The launch goal turns the loop on at session start for headless runs
+Flags win over the environment, which wins over the file and its rules. The launch goal turns the loop on at session start for headless runs
 (`PI_RELAY_GOAL="…" pi -p "…"`, pfs subs). Relay removes `PI_RELAY_GOAL` from the environment once it has
 read it (except in rpc mode, where pi-web shares one process), so tools and nested `pi` runs don't inherit
 the parent's goal. Resuming a session with the same launch goal keeps what the branch says: a loop that

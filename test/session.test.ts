@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { stepAt } from "../src/core/steps.ts";
@@ -21,13 +24,15 @@ import {
 	writePresence,
 } from "./harness.ts";
 
-const ENV_KEYS = ["PI_RELAY_NUDGE_AT", "PI_RELAY_NUDGE_EVERY", "PI_RELAY_MAX_RESETS", "PI_RELAY_GOAL", "PI_MSG_DIR"] as const;
+const ENV_KEYS = ["PI_RELAY_NUDGE_AT", "PI_RELAY_NUDGE_EVERY", "PI_RELAY_MAX_RESETS", "PI_RELAY_GOAL", "PI_RELAY_CONFIG", "PI_MSG_DIR"] as const;
+/** Never the machine's config file: a path nothing writes, unless a test brings its own. */
+const NO_CONFIG = join(tmpdir(), `relay-test-no-config-${process.pid}`, "config.json");
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 const open: Harness[] = [];
 
 const env = (values: Partial<Record<(typeof ENV_KEYS)[number], string>>): void => {
 	for (const key of ENV_KEYS) delete process.env[key];
-	Object.assign(process.env, values);
+	Object.assign(process.env, { PI_RELAY_CONFIG: NO_CONFIG }, values);
 };
 
 const start = async (...args: Parameters<typeof openSession>): Promise<Harness> => {
@@ -103,6 +108,33 @@ describe("nudge", () => {
 		const seen = h.requests.some((request) => request.messages.some((message) => textOf(message).startsWith("[relay] you're at")));
 		expect(seen).toBe(true);
 		expect(h.errors).toEqual([]);
+	});
+
+	test("the config file's rule for the model sets the steps; edits apply live and /relay status names the rule", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "relay-config-"));
+		const path = join(dir, "config.json");
+		const write = (rule: Record<string, unknown>) =>
+			writeFileSync(path, JSON.stringify({ nudgeAt: 90, rules: [{ model: "other/*", nudgeAt: 5 }, { model: "faux/tiny", window: "20k", ...rule }] }));
+		write({ nudgeAt: 25, nudgeEvery: 10 });
+		env({ PI_RELAY_CONFIG: path });
+		const told = captureTold();
+		try {
+			const h = await start();
+			h.respond([call("pad", PAD), call("pad", PAD), call("pad", PAD), call("pad", PAD), call("pad", PAD), call("pad", PAD), say("done")]);
+			await h.session.prompt("grow the context");
+			const steps = relayEntries(h.entries(), "nudge").map((entry) => (entry.details as { step: number }).step);
+			expect(steps.length).toBeGreaterThanOrEqual(2);
+			for (const step of steps) expect((step - 25) % 10).toBe(0);
+			write({ nudgeAt: 95 });
+			await h.session.prompt("/relay status");
+			const status = told.lines().join("\n");
+			expect(status).toContain("(first at 95%, then every 5%)");
+			expect(status).toContain(`config: ${path} (rule 2: model faux/tiny, window 20k)`);
+			expect(h.errors).toEqual([]);
+		} finally {
+			told.restore();
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("never nudges below the first step", async () => {

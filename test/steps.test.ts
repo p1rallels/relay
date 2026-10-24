@@ -68,4 +68,12 @@ describe("nextStep", () => {
 		expect(nextStep(51, 45, 40, 5)).toBe(55);
 		expect(nextStep(52, undefined, 40, 5, 51)).toBe(55);
 	});
+	test("after a config change, the first step of the new grid above what was nudged, agreeing with dueStep", () => {
+		expect(nextStep(47, 45, 95, 5)).toBe(95);
+		expect(dueStep(94, 45, 95, 5)).toBeUndefined();
+		expect(dueStep(95, 45, 95, 5)).toBe(95);
+		expect(nextStep(44, 43, 40, 5)).toBe(45);
+		expect(dueStep(45, 43, 40, 5)).toBe(45);
+		expect(nextStep(0.35, 0.3, 0.2, 0.1)).toBe(0.4);
+	});
 });

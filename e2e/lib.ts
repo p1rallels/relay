@@ -15,12 +15,14 @@ export type Json = Record<string, unknown>;
 export interface World {
 	readonly cwd: string;
 	readonly sessions: string;
+	/** relay's config file for this world ($PI_RELAY_CONFIG); absent unless the scenario writes it. */
+	readonly config: string;
 	readonly env: Record<string, string>;
 	readonly children: Subprocess[];
 	readonly dispose: () => void;
 }
 
-/** A temp cwd, session dir and msg store, and an env without the caller's session or relay settings. */
+/** A temp cwd, session dir, msg store and relay config path, and an env without the caller's session or relay settings. */
 export const world = (label: string, extraEnv: Record<string, string> = {}): World => {
 	const base = mkdtempSync(join(tmpdir(), `relay-e2e-${label}-`));
 	const cwd = join(base, "cwd");
@@ -31,10 +33,12 @@ export const world = (label: string, extraEnv: Record<string, string> = {}): Wor
 		(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("PI_RELAY_") && entry[0] !== "PI_SESSION_ID" && entry[0] !== "PI_SESSION_FILE",
 	);
 	const children: Subprocess[] = [];
+	const config = join(base, "relay-config.json");
 	return {
 		cwd,
 		sessions,
-		env: { ...Object.fromEntries(inherited), PI_MSG_DIR: join(base, "msg"), ...extraEnv },
+		config,
+		env: { ...Object.fromEntries(inherited), PI_MSG_DIR: join(base, "msg"), PI_RELAY_CONFIG: config, ...extraEnv },
 		children,
 		dispose: () => {
 			for (const child of children) if (child.exitCode === null) child.kill();

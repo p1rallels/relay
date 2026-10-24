@@ -1,8 +1,10 @@
+import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { locateLookup, runCatchup, searchCommand } from "./catchup.ts";
+import { readConfigFile } from "./config-file.ts";
 import { parseCommand, SUBCOMMANDS } from "./core/command.ts";
-import { readConfig, type RelayConfig, SETTINGS } from "./core/config.ts";
+import { configPath, fileConfigFrom, type ModelRef, readConfig, type RelayConfig, SETTINGS } from "./core/config.ts";
 import { humanAskDraft, loopDraft, loopOnDraft, loopStopDrafts, nudgeDraft, resetDrafts } from "./core/drafts.ts";
 import { CUSTOM_TYPE, type Entry, isHandoffAsk, type LoopSwitch, TOOL_NAME, type ToolDetails, unansweredUser, userMessages } from "./core/entries.ts";
 import { launchGoalApplies, loopDecides, settleDecision, toolDecision } from "./core/loop.ts";
@@ -10,7 +12,7 @@ import { askDelivered, beforeSettleStep, commandStep, type HumanRequest, settled
 import { type RelayState, stateFrom } from "./core/state.ts";
 import { baselinePercent, dueStep } from "./core/steps.ts";
 import { buildSummary } from "./core/summary.ts";
-import { backoffText, requestText, statusLine, statusReport, stopReasonText, toolResultText, unknownCommandText } from "./core/text.ts";
+import { backoffText, type ConfigSource, requestText, statusLine, statusReport, stopReasonText, toolResultText, unknownCommandText } from "./core/text.ts";
 import { hasLiveSub } from "./subs.ts";
 
 const STATUS_KEY = "relay";
@@ -46,6 +48,13 @@ const percentOf = (ctx: ExtensionContext): number | undefined => ctx.getContextU
 
 const stateOf = (ctx: ExtensionContext): RelayState => stateFrom(ctx.sessionManager.getBranch());
 
+/** The window is the one the usage percent is of, so a rule's window and the nudge steps agree. */
+const modelOf = (ctx: ExtensionContext): ModelRef | undefined => {
+	const model = ctx.model;
+	if (model === undefined) return undefined;
+	return { provider: model.provider, id: model.id, contextWindow: ctx.getContextUsage()?.contextWindow ?? model.contextWindow };
+};
+
 const toolText = (text: string) => [{ type: "text" as const, text }];
 
 export default function relayLoop(pi: ExtensionAPI): void {
@@ -67,7 +76,23 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		backoff = undefined;
 	};
 
-	const config = (): RelayConfig => readConfig(process.env, (name) => pi.getFlag(name)).config;
+	/** Read on every use, so edits to the config file apply from the next turn and a /model switch picks its rule. */
+	const settings = (ctx: ExtensionContext): { readonly config: RelayConfig; readonly source: ConfigSource } => {
+		const read = readConfigFile(configPath(process.env, homedir()));
+		const { file, warnings: fileWarnings } = fileConfigFrom(read);
+		const { config, warnings, rule } = readConfig(process.env, (name) => pi.getFlag(name), file, modelOf(ctx));
+		const matched = rule === undefined ? undefined : file.rules[rule];
+		return {
+			config,
+			source: {
+				path: read.path,
+				found: read.kind !== "absent",
+				rule: rule === undefined || matched === undefined ? undefined : { index: rule, rule: matched },
+				warnings: [...fileWarnings, ...warnings],
+			},
+		};
+	};
+	const config = (ctx: ExtensionContext): RelayConfig => settings(ctx).config;
 
 	const tell = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info"): void => {
 		try {
@@ -90,8 +115,8 @@ export default function relayLoop(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		forget();
-		const { config: current, warnings } = readConfig(process.env, (name) => pi.getFlag(name));
-		for (const warning of warnings) tell(ctx, `relay: ${warning}`, "warning");
+		const { config: current, source } = settings(ctx);
+		for (const warning of source.warnings) tell(ctx, `relay: ${warning}`, "warning");
 		const state = stateOf(ctx);
 		const launched = launchGoalApplies(current.goal, state);
 		if (launched) switchLoop({ loop: "on", goal: current.goal, by: "launch" });
@@ -126,7 +151,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 	};
 
 	const nudgeDraftFor = (ctx: ExtensionContext, state: RelayState, percent: number | undefined) => {
-		const { nudgeAt, nudgeEvery } = config();
+		const { nudgeAt, nudgeEvery } = config(ctx);
 		const baseline = baselinePercent(state.baselineTokens, ctx.getContextUsage()?.contextWindow);
 		const step = dueStep(percent, state.lastNudgeStep, nudgeAt, nudgeEvery, baseline);
 		if (step === undefined || percent === undefined) return undefined;
@@ -244,7 +269,7 @@ export default function relayLoop(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const note = params.note.trim();
 			const state = stateOf(ctx);
-			const decision = toolDecision(params.done === true, queued !== undefined, state, config());
+			const decision = toolDecision(params.done === true, queued !== undefined, state, config(ctx));
 			const result = (text: string, details: ToolDetails) => ({ content: toolText(text), details });
 			switch (decision.outcome) {
 				case "duplicate":
@@ -276,14 +301,16 @@ export default function relayLoop(pi: ExtensionAPI): void {
 			switch (command.kind) {
 				case "status": {
 					const usage = ctx.getContextUsage();
+					const { config: current, source } = settings(ctx);
 					const report = statusReport({
 						sessionId: ctx.sessionManager.getSessionId(),
 						percent,
 						contextWindow: usage?.contextWindow,
 						baselinePercent: baselinePercent(state.baselineTokens, usage?.contextWindow),
 						state,
-						config: config(),
+						config: current,
 						request,
+						source,
 					});
 					tell(ctx, report);
 					return;

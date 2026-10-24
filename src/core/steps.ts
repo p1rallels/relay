@@ -32,7 +32,7 @@ export const dueStep = (
 export const baselinePercent = (baselineTokens: number | undefined, contextWindow: number | undefined): number | undefined =>
 	baselineTokens === undefined || contextWindow === undefined || !(contextWindow > 0) ? undefined : (baselineTokens / contextWindow) * 100;
 
-/** Where the next nudge comes, for status reports. */
+/** Where the next nudge comes, for status reports: the first step above the floor, which may be off the grid after a config change. */
 export const nextStep = (
 	percent: number | null | undefined,
 	lastStep: number | undefined,
@@ -43,5 +43,6 @@ export const nextStep = (
 	const reached = percent === null || percent === undefined ? undefined : stepAt(percent, nudgeAt, every);
 	const started = baselinePercent === undefined ? undefined : stepAt(baselinePercent, nudgeAt, every);
 	const floor = Math.max(lastStep ?? -Infinity, reached ?? -Infinity, started ?? -Infinity);
-	return floor === -Infinity ? nudgeAt : tidy(floor + every);
+	if (floor < nudgeAt) return nudgeAt;
+	return tidy(nudgeAt + (Math.floor(tidy((floor - nudgeAt) / every)) + 1) * every);
 };

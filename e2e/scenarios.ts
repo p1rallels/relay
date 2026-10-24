@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { requestText, unknownCommandText } from "../src/core/text.ts";
 import {
@@ -9,6 +9,7 @@ import {
 	detailsOf,
 	HOLD_EXTENSION,
 	isAssistant,
+	MODEL,
 	type Json,
 	messageOf,
 	notices,
@@ -38,15 +39,21 @@ const failure = (error: unknown): Check => check("scenario ran", false, error in
 
 /**
  * claude-haiku-5-5 has a 1M window and pi's system prompt alone is ~0.9% of it, so the steps start
- * above that and are tenths of a percent. The relay tool is excluded: a model that obeys the nudge
- * would reset, and the steps would start over.
+ * above that and are tenths of a percent. They come from the config file's rule for the model and
+ * its window, past a rule for another model and a top level that would never nudge. The relay tool
+ * is excluded: a model that obeys the nudge would reset, and the steps would start over.
  */
 export const nudge = async (): Promise<boolean> => {
 	const at = 1.1;
 	const every = 0.3;
-	const w = world("nudge", { PI_RELAY_NUDGE_AT: String(at), PI_RELAY_NUDGE_EVERY: String(every) });
+	const w = world("nudge");
 	const checks: Check[] = [];
 	try {
+		const rules = [
+			{ model: "nothing/*", nudgeAt: 0.5 },
+			{ model: MODEL, window: "1m", nudgeAt: at, nudgeEvery: every },
+		];
+		writeFileSync(w.config, JSON.stringify({ nudgeAt: 90, rules }));
 		const prompt = [
 			"Run these bash commands, exactly one per turn, in this order: `seq 1 2500`, then `seq 2501 5000`, then `seq 5001 7500`, then `seq 7501 10000`.",
 			"After the fourth, reply with just DONE.",
@@ -81,7 +88,7 @@ export const nudge = async (): Promise<boolean> => {
 	} finally {
 		w.dispose();
 	}
-	return report("nudge: relay messages at 1.1%, then every 0.3%", checks);
+	return report("nudge: relay messages at 1.1%, then every 0.3%, from the config file's rule for the model", checks);
 };
 
 export const reset = async (): Promise<boolean> => {
@@ -90,7 +97,7 @@ export const reset = async (): Promise<boolean> => {
 	try {
 		const prompt = [
 			"This is a test of the relay tool.",
-			"1) Run `seq 1 9000` with bash, once.",
+			"1) Run exactly `seq 1 9000` with bash, with no pipe, tail or head. Once you have its output, run `echo LAST=<the last number it printed>` in a second bash call.",
 			"2) When a [relay] message says how full your context is, call the relay tool with the note exactly: RELAY-E2E-NOTE seq ran; next: reply RESUMED",
 			"3) After your context is reset, reply with exactly RESUMED and nothing else.",
 		].join("\n");

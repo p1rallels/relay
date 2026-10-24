@@ -3,7 +3,7 @@ import { parseCommand } from "../src/core/command.ts";
 import { loopStopDrafts, nudgeDraft, resetDrafts } from "../src/core/drafts.ts";
 import { catchupArgs, commandLine, findLookup, searchArgs, shellQuote } from "../src/core/lookup.ts";
 import { INITIAL_STATE } from "../src/core/state.ts";
-import { backoffText, formatDuration, formatPercent, loopText, statusLine, statusReport, unknownCommandText } from "../src/core/text.ts";
+import { backoffText, type ConfigSource, formatDuration, formatPercent, loopText, statusLine, statusReport, unknownCommandText } from "../src/core/text.ts";
 
 describe("parseCommand", () => {
 	test("only a bare /relay resets", () => {
@@ -119,6 +119,24 @@ describe("text", () => {
 				"session: abc",
 			].join("\n"),
 		);
+	});
+	test("status report: where the settings came from", () => {
+		const input = {
+			sessionId: "abc",
+			percent: 43,
+			contextWindow: 272_000,
+			baselinePercent: undefined,
+			state: INITIAL_STATE,
+			config: { nudgeAt: 95, nudgeEvery: 5, maxResets: undefined, goal: undefined },
+		};
+		const rule = { model: "*gpt-5.5*", window: 272_000, nudgeAt: 95, nudgeEvery: undefined };
+		const lines = (source: ConfigSource) => statusReport({ ...input, source }).split("\n").slice(4);
+		expect(lines({ path: "/c.json", found: true, rule: { index: 1, rule }, warnings: ["bad key"] })).toEqual([
+			"config: /c.json (rule 2: model *gpt-5.5*, window 272k)",
+			"config warning: bad key",
+		]);
+		expect(lines({ path: "/c.json", found: true, rule: undefined, warnings: [] })).toEqual(["config: /c.json (no rule matched)"]);
+		expect(lines({ path: "/c.json", found: false, rule: undefined, warnings: [] })).toEqual(["config: /c.json (not found, defaults)"]);
 	});
 	test("status report: a /relay on its way", () => {
 		const report = statusReport({

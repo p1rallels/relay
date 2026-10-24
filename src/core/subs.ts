@@ -6,14 +6,13 @@
  *   <root>/sessions/<session id>.json   presence: v, id, name?, parent?, cwd, pid, mode, activity, startedAt, heartbeatAt, endedAt?
  */
 import { join } from "node:path";
+import { agentDir, type Env, expandHome, nonEmpty } from "./paths.ts";
 
 export const PRESENCE_VERSION = 1;
 /** msg's STALE_AFTER_MS: a record whose heartbeat is older than this is offline, whatever it claims. */
 export const STALE_AFTER_MS = 45_000;
 /** File times can be a second or two coarse; a record is never written before the heartbeat it carries. */
 const MTIME_SLACK_MS = 2_000;
-
-type Env = Readonly<Record<string, string | undefined>>;
 
 /** The fields relay needs from a presence record. */
 export interface Presence {
@@ -35,22 +34,11 @@ const record = (value: unknown): Readonly<Record<string, unknown>> | undefined =
 
 const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
-const nonEmpty = (value: string | undefined): string | undefined => {
-	const trimmed = value?.trim();
-	return trimmed === "" ? undefined : trimmed;
-};
-
-const expandHome = (path: string, home: string): string => {
-	if (path === "~") return home;
-	return path.startsWith("~/") ? join(home, path.slice(2)) : path;
-};
-
 /** Where msg keeps its store: $PI_MSG_DIR, else $PI_CODING_AGENT_DIR/msg, else ~/.pi/agent/msg; a leading ~ is home. */
 export const msgStoreRoot = (env: Env, home: string): string => {
 	const configured = nonEmpty(env.PI_MSG_DIR);
 	if (configured) return expandHome(configured, home);
-	const agentDir = nonEmpty(env.PI_CODING_AGENT_DIR);
-	return join(agentDir ? expandHome(agentDir, home) : join(home, ".pi", "agent"), "msg");
+	return join(agentDir(env, home), "msg");
 };
 
 export const presenceDir = (root: string): string => join(root, "sessions");
