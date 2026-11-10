@@ -1,6 +1,6 @@
 /**
  * msg's presence records, as relay reads them to tell whether a session has a live sub (a session
- * started from its bash). The store is msg's contract (~/Desktop/cc/msg-cli, README "Store"): relay
+ * started from its bash). The store is msg's contract (github.com/p1rallels/msg, README "Store"): relay
  * only reads it, imports nothing from msg, and parses records the way msg and pi-web's msg-store.ts do.
  *
  *   <root>/sessions/<session id>.json   presence: v, id, name?, parent?, cwd, pid, mode, activity, startedAt, heartbeatAt, endedAt?
