@@ -7,7 +7,7 @@ When a session's context gets big, the agent gets nudged. When it asks (or you d
 No LLM summarization, no waiting. Optionally, it keeps the agent going until a goal is done.
 
 ```
-pi install /path/to/relay-loop
+pi install /path/to/relay
 ```
 
 ## How it works
